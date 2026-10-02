@@ -22,7 +22,7 @@ max_facts_per_episode: 8
 min_filler_tokens: 0
 max_filler_tokens: 6
 n_time_buckets: 64
-conflict_fraction: 0.15
+conflict_fraction: 0.30
 interference_fraction: 0.10
 # DECISION: The SPEC names fact classes but not their sampling weights. Equal
 # weights keep every class common enough for query generation and testing.

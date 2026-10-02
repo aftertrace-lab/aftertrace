@@ -20,10 +20,15 @@ from aftertrace.world.generator import make_world
 
 def print_query_with_evidence(world, query, *, include_episodes: bool = True) -> None:
     evidence = ",".join(str(index) for index in query.evidence_episode_ids) or "none"
+    provenance = (
+        f" from_superseding={query.from_superseding}"
+        if query.query_type == "R"
+        else ""
+    )
     print(
         f"[{query.id:04d} after={query.after_episode:04d} "
         f"type={query.query_type} evidence={evidence} "
-        f"competitor_count={query.competitor_count}] "
+        f"competitor_count={query.competitor_count}{provenance}] "
         f"{' '.join(query.tokens)} -> {query.answer}"
     )
     if include_episodes:

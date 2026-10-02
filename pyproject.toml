@@ -19,6 +19,8 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = ["-m", "not slow"]
+markers = ["slow: generator checks that take more than one minute in aggregate"]
 
 [tool.setuptools.packages.find]
 include = ["aftertrace*"]

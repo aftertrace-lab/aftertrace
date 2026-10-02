@@ -85,3 +85,32 @@ Before reader training or condition evaluation, add `p_restate = 0.3` as the
 maximum realized fraction of sampled WORKS/MOVED events that exactly repeat an
 already-seen `(entity, relation, object)` fact. Log realized WORKS, MOVED, and
 combined restatement rates per world.
+
+### 2026-10-02 — Ground-truth labels and lossless residuals
+
+Before reader training, restrict value labels to facts present in world ground
+truth; absent `(entity, relation)` pairs are type-E ABSTAIN. Context-dependent
+reader targets use the world value only when explicit or predictive evidence
+is present. Residual coding retains every fact and substitutes `PRED` for
+canonical prior-predicted values, with explicit EP/RES/GIST/SUM headers and
+subject carry-forward in gist traces.
+
+### 2026-10-02 — Exclude type D aggregation
+
+D excluded: oracle evidence ~15k tokens, outside reader context; aggregation is
+out of scope for Stage 0.
+
+### 2026-10-02 — Stage 0 demand coverage
+
+Raise the superseding-conflict entity fraction to 30%. Floor each Stage 0
+query type's aggregate demand share at 8% after each Dirichlet draw, and reserve
+unique supported forms in eval worlds. Calibration samples unique forms without
+replacement and fails if a type has fewer than its required sample count.
+
+### 2026-10-02 — R uniqueness floor and H3 subgroup
+
+Set the R uniqueness floor to 250 at all `p_redundancy` levels. Reason:
+full-cue uniqueness is scarcer at high redundancy; 275 observed at p=0.9.
+Log `from_superseding` on each R query so reinstatement results can be separated
+by superseding-event provenance. H3 must also hold on R queries with
+`from_superseding = False`.

@@ -8,6 +8,7 @@ from aftertrace.world.generator import make_world
 from aftertrace.world.queries import solve_query
 
 
+@pytest.mark.slow
 def test_make_world_is_deterministic(world_config: dict) -> None:
     first = make_world(2_000_000, world_config)
     second = make_world(2_000_000, world_config)
@@ -15,6 +16,7 @@ def test_make_world_is_deterministic(world_config: dict) -> None:
 
 
 @pytest.mark.parametrize("p_redundancy", [0.2, 0.6, 0.9])
+@pytest.mark.slow
 def test_moved_prior_match_rate_over_three_worlds(
     world_config: dict, p_redundancy: float
 ) -> None:
@@ -60,6 +62,7 @@ def test_conflicts_supersede_works_and_moved_together(world_config: dict) -> Non
     assert len(conflicted) == expected
 
 
+@pytest.mark.slow
 def test_episode_fact_keys_are_unique_across_three_worlds(world_config: dict) -> None:
     for seed in range(2_000_040, 2_000_043):
         world = make_world(seed, world_config)
@@ -88,7 +91,7 @@ def test_queries_are_symbolically_derivable_from_declared_evidence(
 ) -> None:
     world = make_world(2_000_020, world_config)
     observed_types = Counter(query.query_type for query in world.queries)
-    assert set(observed_types) == {"A", "B", "C", "D", "E", "R"}
+    assert set(observed_types) == {"A", "B", "C", "E", "R"}
     conflict_relations = {
         query.tokens[2] for query in world.queries if query.query_type == "C"
     }
@@ -120,13 +123,14 @@ def test_type_b_uses_distinct_earlier_work_and_nonconflict_target(
         work_episode_id, told_episode_id = query.evidence_episode_ids
         assert work_episode_id < told_episode_id
         told_episode = world.episodes[told_episode_id]
-        subject, place = query.tokens[2], query.tokens[5]
+        subject, place, time = query.tokens[2], query.tokens[5], query.tokens[7]
         told = next(
             fact
             for fact in told_episode.facts
             if fact.subject == subject
             and fact.relation == "TOLD"
             and fact.extra == ("AT", place)
+            and told_episode.time == time
         )
         target = told.object
         assert target not in conflict_entities
@@ -167,8 +171,30 @@ def test_type_r_cues_are_target_free_unique_and_log_competitors(
     world = make_world(2_000_026, world_config)
     queries = [query for query in world.queries if query.query_type == "R"]
     assert queries
+    latest: dict[str, dict[str, str]] = {"WORKS": {}, "MOVED": {}}
+    superseding_events: set[tuple[int, str]] = set()
+    for episode in world.episodes:
+        current = {
+            relation: {
+                fact.subject: fact.object
+                for fact in episode.facts
+                if fact.relation == relation
+            }
+            for relation in ("WORKS", "MOVED")
+        }
+        for entity in current["WORKS"].keys() & current["MOVED"].keys():
+            if (
+                entity in latest["WORKS"]
+                and entity in latest["MOVED"]
+                and current["WORKS"][entity] != latest["WORKS"][entity]
+                and current["MOVED"][entity] != latest["MOVED"][entity]
+            ):
+                superseding_events.add((episode.id, entity))
+        for relation in ("WORKS", "MOVED"):
+            latest[relation].update(current[relation])
     for query in queries:
         assert isinstance(query.competitor_count, int)
+        assert isinstance(query.from_superseding, bool)
         assert len(query.evidence_episode_ids) == 1
         evidence_id = query.evidence_episode_ids[0]
         evidence = world.episodes[evidence_id]
@@ -189,6 +215,9 @@ def test_type_r_cues_are_target_free_unique_and_log_competitors(
         targets = {fact.object for fact in matching_interactions if fact.object in moved_entities}
         assert len(targets) == 1
         assert targets.isdisjoint(query.tokens)
+        assert query.from_superseding == (
+            (evidence_id, next(iter(targets))) in superseding_events
+        )
         assert sum(
             all(feature in episode.tokens for feature in cue)
             for episode in world.episodes
@@ -201,6 +230,7 @@ def test_type_r_cues_are_target_free_unique_and_log_competitors(
         assert query.competitor_count == len(competitors)
 
 
+@pytest.mark.slow
 def test_competitor_count_matches_brute_force_for_200_r_queries(
     world_config: dict,
 ) -> None:
@@ -262,7 +292,56 @@ def test_type_e_queries_never_have_evidence(world_config: dict) -> None:
     )
 
 
+def test_labels_never_name_a_value_absent_from_the_world(world_config: dict) -> None:
+    world = make_world(2_000_029, world_config)
+    world_values = {
+        fact.object for episode in world.episodes for fact in episode.facts
+    }
+    missing_moved = 0
+    for query in world.queries:
+        if query.answer != "ABSTAIN":
+            assert query.answer in world_values
+        else:
+            entity, relation = query.tokens[1], query.tokens[2]
+            assert not any(
+                fact.subject == entity and fact.relation == relation
+                for episode in world.episodes
+                for fact in episode.facts
+            )
+            if relation == "MOVED":
+                missing_moved += 1
+            assert query.evidence_episode_ids == ()
+    assert missing_moved > 0
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("seed", "p_redundancy"),
+    ((2_000_060, 0.2), (2_000_061, 0.6), (2_000_062, 0.9)),
+)
+def test_eval_worlds_meet_unique_query_floors_for_each_stage0_type(
+    world_config: dict, seed: int, p_redundancy: float
+) -> None:
+    world = make_world(seed, {**world_config, "phase": "eval", "p_redundancy": p_redundancy})
+    minimum_unique = {"A": 300, "B": 300, "C": 300, "E": 300, "R": 250}
+    for query_type, minimum in minimum_unique.items():
+        unique_queries = {
+            query.tokens for query in world.queries if query.query_type == query_type
+        }
+        assert len(unique_queries) >= minimum, (query_type, len(unique_queries))
+    for mixture in world.demand_mixtures:
+        type_shares: Counter[str] = Counter()
+        for key, weight in mixture.items():
+            query_type = key.split(":", 1)[0]
+            type_shares[query_type] += weight
+        assert all(
+            type_shares[query_type] >= 0.08 - 1e-10
+            for query_type in ("A", "B", "C", "E", "R")
+        )
+
+
 @pytest.mark.parametrize("seed", range(2_000_030, 2_000_035))
+@pytest.mark.slow
 def test_eval_world_has_at_least_5000_poisson_queries(
     world_config: dict, seed: int
 ) -> None:

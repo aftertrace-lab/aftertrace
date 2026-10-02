@@ -19,10 +19,10 @@ class GrammarPrior:
         return self.company_home_city[company] == city
 
     def predicts_joined_year(self, company: str, year: str) -> bool:
-        return year in self.company_year_window[company]
+        return year == self.company_year_window[company][0]
 
     def predicts_place(self, city: str, place: str) -> bool:
-        return place in self.city_typical_places[city]
+        return place == self.city_typical_places[city][0]
 
 
 def make_grammar(
@@ -68,8 +68,7 @@ def redundant_or_uniform(
     # DECISION: "else uniform" is interpreted as uniform over non-prior values,
     # so the measured prior-match probability is exactly p_redundancy in expectation.
     if rng.random() < p_redundancy:
-        return str(rng.choice(redundant_values))
+        return redundant_values[0]
     redundant = set(redundant_values)
     alternatives = tuple(value for value in all_values if value not in redundant)
     return str(rng.choice(alternatives))
-

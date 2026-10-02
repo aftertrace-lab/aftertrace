@@ -27,13 +27,12 @@ runs/          (gitignored)
 
 ## 2. Vocabulary (symbolic, fixed, < 1,000 tokens)
 
-- Special: PAD BOS EOS SEP EP Q A ABSTAIN MASK GIST
+- Special: PAD BOS EOS SEP EP EPP RES SUM Q A ABSTAIN MASK PRED GIST
 - Relations (12): WORKS MOVED JOINED_YEAR TOLD AT MET OWNS COLOR LIVES
   STUDIED MANAGES SIBLING
-- Query operators: CURRENT PREV HOP2 COUNT CTX
+- Query operators: CURRENT PREV HOP2 CTX
 - Values: cities C_0..C_59, companies O_0..O_39, years Y_0..Y_29,
-  colors K_0..K_11, places P_0..P_19, owned objects J_0..J_15,
-  counts N_0..N_15
+  colors K_0..K_11, places P_0..P_19, owned objects J_0..J_15
 - Entities: E_0..E_511 (abstract slots, remapped per world/sequence)
 - Time buckets: T_0..T_63
 - Filler (incidental noise): F_0..F_63
@@ -47,8 +46,10 @@ knowledge").** Each company has a home city; each city has a typical place
 set; each company has a hiring-year window. Parameter `p_redundancy`
 controls how often facts follow the prior:
 - MOVED city = company's home city with prob `p_redundancy`, else uniform.
-- JOINED_YEAR within company window with prob `p_redundancy`.
-- AT place drawn from city's typical places with prob `p_redundancy`.
+- JOINED_YEAR uses the canonical first year in the company window with prob
+  `p_redundancy`, otherwise a year outside the window.
+- AT uses the canonical first place in the city's typical-place set with prob
+  `p_redundancy`, otherwise a place outside the set.
 Sweep `p_redundancy ∈ {0.2, 0.6, 0.9}`. Report all results per level.
 
 Parameter `p_restate = 0.3` caps repeated identical WORKS/MOVED facts. When a
@@ -75,10 +76,11 @@ EP T_12 E_7 WORKS O_3 SEP E_7 MOVED C_14 SEP E_7 TOLD E_22 AT P_5 SEP
 E_7 COLOR K_2 F_31 F_9 EOS
 ```
 
-**Conflicts.** 15% of entities later get a superseding event: a new episode
+**Conflicts.** 30% of entities later get a superseding event: a new episode
 contains both a new WORKS and a new MOVED. The new MOVED follows the new
 company's home-city prior with probability `p_redundancy`. Its time bucket is
-strictly later than the original event's bucket.
+strictly later than the original event's bucket. Other facts, including any
+TOLD or MET interaction, follow the ordinary episode-sampling process.
 
 **Interference.** 10% of entities have a "sibling" sharing all relation
 objects except one slot.
@@ -90,9 +92,8 @@ Query types, rendered as `Q <operator/args> A` with answer token(s) after A:
 | Type | Example | Answer |
 |---|---|---|
 | A 1-hop | `Q E_7 MOVED A` | C_14 |
-| B 2-hop | `Q HOP2 E_7 TOLD AT P_5 WORKS A` | company of the entity E_7 told at P_5, from a distinct earlier episode |
+| B 2-hop | `Q HOP2 E_7 TOLD AT P_5 TIME T_12 WORKS A` | company of the entity E_7 told at P_5 in T_12, from a distinct earlier episode |
 | C conflict | `Q E_7 MOVED PREV A` / `CURRENT` | earlier / latest value |
-| D count | `Q COUNT WORKS O_3 A` | N_k |
 | E unavailable | `Q E_7 STUDIED A` (never stated) | ABSTAIN |
 | R reinstatement | `Q CTX E_7 AT P_5 T_12 MOVED A` | target entity's city, cued by its interaction partner, place, and time; the target is omitted |
 
@@ -105,23 +106,36 @@ For type R, the evidence episode contains a TOLD or MET interaction and the
 other participant's MOVED fact. The cue is the partner entity, interaction
 place, and episode time bucket; the full cue identifies exactly one stream
 episode. Each R query records `competitor_count`, the number of earlier episodes
-whose interaction cue matches exactly two of those three features.
+whose interaction cue matches exactly two of those three features, and
+`from_superseding`, a boolean indicating whether the target's MOVED fact is in a
+same-episode WORKS+MOVED change from earlier values.
 
 **Demand.** Per world, the mixture over (query type × fact class) is drawn
-from Dirichlet(α=0.5) — no fixed importance ordering. At stream midpoint the
-mixture is redrawn (demand shift). Query lag is heavy-tailed (log-uniform
-over 1..stream length); ≥10% of queries target items older than 90% of the
-stream.
+from Dirichlet(α=0.5), then each query type's aggregate share is floored at
+8% and the mixture is renormalized. At stream midpoint the Dirichlet mixture
+is redrawn and floored again. Query lag is heavy-tailed (log-uniform over
+1..stream length); ≥10% of queries target items older than 90% of the stream.
 
 Queries are interleaved: after each episode, emit Poisson(λ=3.0) queries.
-Evaluation set: ≥5,000 queries per world.
+Evaluation set: ≥5,000 queries per world. Eval worlds target at least 300 unique
+forms for A, B, C, and E; forms are distinguished by their complete token
+sequence. B includes the interaction time bucket only. R queries use
+unique supported cues and must provide at least 250 unique forms at every
+`p_redundancy` level. Calibration samples up to 300 unique forms per type
+without replacement; it requires 300 for A/B/C/E and 250 for R.
 
 ## 5. Abstention labels
 
-Target is ABSTAIN iff the context contains neither the fact nor any
-prior-predictive evidence for it (e.g., the company, for a MOVED query).
-If predictive evidence is present but the fact is absent, the target is the
-true answer — the reader is expected to reconstruct from the prior.
+World query labels come only from world ground truth. A query for an
+`(entity, relation)` with no fact anywhere in the world is type E with target
+ABSTAIN; the grammar never creates a value label for an absent world fact.
+
+Reader-training labels additionally depend on the sampled context. If the
+world fact exists and its value or sufficient prior-predictive evidence is in
+context, the target is the world's value. If the world fact exists but neither
+the value nor predictive evidence is in context, the training target is
+ABSTAIN. Thus predictive evidence controls whether a known world value is
+supervised, but never invents a value absent from the world.
 
 ## 6. Reader
 
@@ -159,16 +173,35 @@ Continuous fidelity r ∈ [0,1], quantized to levels for rendering:
 |---|---|
 | L4 | full episode incl. filler |
 | L3 | all facts, no filler |
-| L2 | facts above a utility-weight threshold |
-| L1 | anchor fact + relation keys with objects masked: `GIST E_7 WORKS O_3 MOVED MASK` |
+| L2 | first `ceil(0.6 × n_facts)` facts in canonical episode order; explicit placeholder until utility weights are available |
+| L1 | time, subject entities, and grouped relation keys; all values omitted: `GIST T_0 E_420 SIBLING E_23 SEP E_312 WORKS MOVED MET E_420 SEP E_23 TOLD E_312 EOS` |
 | L0 | deleted |
 
-Residual-coded rendering (condition 4): drop any fact the grammar prior
-predicts correctly (given other facts in the episode); keep only
-mispredicted facts. Lossless with respect to the prior.
+Headers are format-specific: L4/L3 use `EP`, partial L2 episodes use `EPP`,
+residual-coded episodes use `RES`, L1 uses `GIST`, and summary lines use
+`SUM`.
 
-Summary rendering (condition 10): per-entity line of latest values,
-rewritten every 100 episodes.
+Until calibrated utility weights exist, L2 uses the deterministic placeholder
+rule: retain the first `ceil(0.6 × n_facts)` facts in the episode's canonical
+fact order. It does not rank or filter by the currently configured weights.
+
+L1 gist traces retain the time bucket, every subject entity (including
+interaction partners), and every relation token. All value tokens (`C_`, `O_`,
+`P_`, `Y_`, `K_`, `J_`) are dropped without MASK placeholders. Relations are
+grouped by subject in first-appearance order; each group begins with its entity
+token, and SEP separates groups. Thus all `(entity, relation)` pairs can be
+recovered while values are unavailable.
+
+Residual-coded rendering (condition 4) preserves fact presence and replaces a
+prior-predicted value with `PRED`, for example `E_7 MOVED PRED` or
+`E_208 TOLD E_9 AT PRED`. Incidental COLOR and OWNS facts are never altered.
+Decoding `PRED` with the deterministic shared prior and conditioning facts
+reproduces the original fact set exactly.
+
+Summary rendering (condition 10): for a stream prefix ending at episode `i`,
+emit one `SUM` line per entity containing its latest value for each relation
+seen through `i`. Summary snapshots are rewritten every 100 episodes; the
+snapshot after the 500th episode therefore includes episode ids 0 through 499.
 
 ## 8. Retriever (shared)
 

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
-from . import vocab
-
 if TYPE_CHECKING:
     from .generator import Episode, Fact
     from .grammar import GrammarPrior
@@ -28,6 +26,7 @@ class Query:
     lag: int | None
     demand_half: int
     competitor_count: int | None = None
+    from_superseding: bool | None = None
 
     @property
     def rendered(self) -> tuple[str, ...]:
@@ -42,14 +41,57 @@ _DEMAND_KEYS = (
     ("A", "incidental"),
     ("B", "social"),
     ("C", "core_relational"),
-    ("D", "core_relational"),
     ("E", "unavailable"),
     ("R", "reinstatement"),
 )
+_MIN_QUERY_TYPE_SHARE = 0.08
 
 
 def _key_name(key: tuple[str, str]) -> str:
     return f"{key[0]}:{key[1]}"
+
+
+def _floor_type_mixture(weights: np.ndarray) -> np.ndarray:
+    """Floor aggregate query-type mass, preserving within-type proportions."""
+
+    types = tuple(dict.fromkeys(query_type for query_type, _ in _DEMAND_KEYS))
+    masses = {
+        query_type: sum(
+            float(weights[index])
+            for index, (candidate_type, _) in enumerate(_DEMAND_KEYS)
+            if candidate_type == query_type
+        )
+        for query_type in types
+    }
+    fixed: dict[str, float] = {}
+    active = list(types)
+    remaining = 1.0
+    while active:
+        active_total = sum(masses[query_type] for query_type in active)
+        below_floor = [
+            query_type
+            for query_type in active
+            if remaining * masses[query_type] / active_total < _MIN_QUERY_TYPE_SHARE
+        ]
+        if not below_floor:
+            for query_type in active:
+                fixed[query_type] = remaining * masses[query_type] / active_total
+            break
+        for query_type in below_floor:
+            fixed[query_type] = _MIN_QUERY_TYPE_SHARE
+            remaining -= _MIN_QUERY_TYPE_SHARE
+            active.remove(query_type)
+    result = np.zeros_like(weights, dtype=float)
+    for query_type in types:
+        indices = [
+            index
+            for index, (candidate_type, _) in enumerate(_DEMAND_KEYS)
+            if candidate_type == query_type
+        ]
+        original = weights[indices]
+        within = original / original.sum() if original.sum() else np.full(len(indices), 1 / len(indices))
+        result[indices] = fixed[query_type] * within
+    return result
 
 
 def _histories(episodes: tuple[Episode, ...]) -> dict[str, dict[str, list[tuple[int, Fact]]]]:
@@ -105,7 +147,7 @@ def _query_a(
     target_step: int,
     histories: Mapping[str, Mapping[str, list[tuple[int, Fact]]]],
     rng: np.random.Generator,
-) -> tuple[tuple[str, ...], str, tuple[int, ...], int, str] | None:
+) -> tuple[tuple[str, ...], str, tuple[int, ...], int | None, str] | None:
     relations_by_class = {
         "core_relational": ("WORKS",),
         "causal_linked": ("MOVED",),
@@ -125,6 +167,7 @@ def _query_b(
     step: int,
     target_step: int,
     histories: Mapping[str, Mapping[str, list[tuple[int, Fact]]]],
+    episodes: tuple[Episode, ...],
     rng: np.random.Generator,
 ) -> tuple[tuple[str, ...], str, tuple[int, ...], int, str] | None:
     candidates: list[tuple[int, Fact, int, Fact]] = []
@@ -158,8 +201,40 @@ def _query_b(
     told_episode, told, work_episode, work = selected
     place = told.extra[1]
     evidence = tuple(sorted({told_episode, work_episode}))
-    tokens = ("Q", "HOP2", told.subject, "TOLD", "AT", place, "WORKS", "A")
+    tokens = (
+        "Q", "HOP2", told.subject, "TOLD", "AT", place,
+        "TIME", episodes[told_episode].time, "WORKS", "A",
+    )
     return tokens, work.object, evidence, told_episode, "social"
+
+
+def _unique_b_query_specs(
+    histories: Mapping[str, Mapping[str, list[tuple[int, Fact]]]],
+    episodes: tuple[Episode, ...],
+) -> list[tuple[int, tuple[tuple[str, ...], str, tuple[int, ...], int, str]]]:
+    """Enumerate unique B forms over valid earlier WORKS evidence episodes."""
+    conflicts = {
+        entity for entity, events in histories.get("WORKS", {}).items()
+        if len(_distinct_events(events)) >= 2
+    }
+    specs: dict[tuple[str, ...], tuple[int, tuple[tuple[str, ...], str, tuple[int, ...], int, str]]] = {}
+    for told_events in histories.get("TOLD", {}).values():
+        for told_episode, told in told_events:
+            if told.object in conflicts:
+                continue
+            for work_episode, work in histories.get("WORKS", {}).get(told.object, []):
+                if work_episode >= told_episode:
+                    continue
+                tokens = (
+                    "Q", "HOP2", told.subject, "TOLD", "AT", told.extra[1],
+                    "TIME", episodes[told_episode].time, "WORKS", "A",
+                )
+                evidence = tuple(sorted({told_episode, work_episode}))
+                specs.setdefault(
+                    tokens,
+                    (told_episode, (tokens, work.object, evidence, told_episode, "social")),
+                )
+    return list(specs.values())
 
 
 def _distinct_events(events: list[tuple[int, Fact]]) -> list[tuple[int, Fact]]:
@@ -168,6 +243,27 @@ def _distinct_events(events: list[tuple[int, Fact]]) -> list[tuple[int, Fact]]:
         if not distinct or event[1].object != distinct[-1][1].object:
             distinct.append(event)
     return distinct
+
+
+def _unique_c_query_specs(
+    histories: Mapping[str, Mapping[str, list[tuple[int, Fact]]]],
+) -> list[tuple[int, tuple[tuple[str, ...], str, tuple[int, ...], int, str]]]:
+    """Enumerate unique CURRENT/PREV queries supported by superseding facts."""
+
+    specs: list[tuple[int, tuple[tuple[str, ...], str, tuple[int, ...], int, str]]] = []
+    for relation in ("WORKS", "MOVED"):
+        for entity, events in histories.get(relation, {}).items():
+            distinct = _distinct_events(events)
+            if len(distinct) < 2:
+                continue
+            evidence = tuple(dict.fromkeys(episode_id for episode_id, _ in events))
+            latest_evidence = max(evidence)
+            for operator, target_index in (("CURRENT", -1), ("PREV", -2)):
+                target_episode, fact = distinct[target_index]
+                tokens = ("Q", entity, relation, operator, "A")
+                built = (tokens, fact.object, evidence, target_episode, "core_relational")
+                specs.append((latest_evidence, built))
+    return specs
 
 
 def _query_c(
@@ -200,46 +296,59 @@ def _query_c(
     return tokens, target[1].object, all_evidence, target[0], "core_relational"
 
 
-def _query_d(
-    step: int,
-    histories: Mapping[str, Mapping[str, list[tuple[int, Fact]]]],
-    rng: np.random.Generator,
-) -> tuple[tuple[str, ...], str, tuple[int, ...], int | None, str] | None:
-    current: dict[str, tuple[int, Fact]] = {}
-    all_evidence: set[int] = set()
-    for entity, events in histories.get("WORKS", {}).items():
-        prior = _at_or_before(events, step)
-        if prior:
-            current[entity] = prior[-1]
-            all_evidence.update(episode_id for episode_id, _ in prior)
-    counts = {
-        company: sum(fact.object == company for _, fact in current.values())
-        for company in vocab.COMPANIES
-    }
-    eligible = tuple(company for company, count in counts.items() if count <= 15)
-    if not eligible:
-        return None
-    company = str(rng.choice(eligible))
-    answer = f"N_{counts[company]}"
-    evidence = tuple(sorted(all_evidence))
-    target = evidence[0] if evidence else None
-    return (("Q", "COUNT", "WORKS", company, "A"), answer, evidence, target, "core_relational")
-
-
 def _query_e(step: int, episodes: tuple[Episode, ...], rng: np.random.Generator):
     entities = sorted({entity for episode in episodes[: step + 1] for entity in episode.entities})
     if not entities:
         return None
-    entity = str(rng.choice(entities))
-    return (("Q", entity, "STUDIED", "A"), "ABSTAIN", (), None, "unavailable")
+    moved_entities = {
+        fact.subject
+        for episode in episodes
+        for fact in episode.facts
+        if fact.relation == "MOVED"
+    }
+    missing_moved = [entity for entity in entities if entity not in moved_entities]
+    if missing_moved and rng.random() < 0.5:
+        entity = str(rng.choice(missing_moved))
+        relation = "MOVED"
+    else:
+        entity = str(rng.choice(entities))
+        relation = "STUDIED"
+    return (("Q", entity, relation, "A"), "ABSTAIN", (), None, "unavailable")
+
+
+def _superseding_entity_events(episodes: tuple[Episode, ...]) -> set[tuple[int, str]]:
+    """Identify same-episode WORKS+MOVED changes from earlier entity values."""
+    latest: dict[str, dict[str, str]] = {"WORKS": {}, "MOVED": {}}
+    result: set[tuple[int, str]] = set()
+    for episode in episodes:
+        current = {
+            relation: {
+                fact.subject: fact.object
+                for fact in episode.facts
+                if fact.relation == relation
+            }
+            for relation in ("WORKS", "MOVED")
+        }
+        for entity in current["WORKS"].keys() & current["MOVED"].keys():
+            if (
+                entity in latest["WORKS"]
+                and entity in latest["MOVED"]
+                and current["WORKS"][entity] != latest["WORKS"][entity]
+                and current["MOVED"][entity] != latest["MOVED"][entity]
+            ):
+                result.add((episode.id, entity))
+        for relation in ("WORKS", "MOVED"):
+            latest[relation].update(current[relation])
+    return result
 
 
 def _build_r_candidates(
     episodes: tuple[Episode, ...],
-) -> list[tuple[int, str, str, str, str, int]]:
-    """Return unique-cue R targets as (episode, target, partner, place, answer, competitors)."""
+) -> list[tuple[int, str, str, str, str, int, bool]]:
+    """Return R targets with cue, answer, competitors, and superseding provenance."""
 
-    raw_candidates: list[tuple[int, str, str, str, str]] = []
+    superseding_events = _superseding_entity_events(episodes)
+    raw_candidates: list[tuple[int, str, str, str, str, bool]] = []
     for episode in episodes:
         moved = {
             fact.subject: fact.object for fact in episode.facts if fact.relation == "MOVED"
@@ -251,15 +360,18 @@ def _build_r_candidates(
             place = fact.extra[1]
             target = fact.object
             if target in moved and target != partner:
-                raw_candidates.append((episode.id, target, partner, place, moved[target]))
+                raw_candidates.append((
+                    episode.id, target, partner, place, moved[target],
+                    (episode.id, target) in superseding_events,
+                ))
 
     targets_by_cue: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
-    for episode_id, target, partner, place, answer in raw_candidates:
+    for episode_id, target, partner, place, answer, _from_superseding in raw_candidates:
         cue = (partner, place, episodes[episode_id].time)
         targets_by_cue.setdefault(cue, set()).add((target, answer))
 
-    candidates: list[tuple[int, str, str, str, str, int]] = []
-    for episode_id, target, partner, place, answer in raw_candidates:
+    candidates: list[tuple[int, str, str, str, str, int, bool]] = []
+    for episode_id, target, partner, place, answer, from_superseding in raw_candidates:
         cue = (partner, place, episodes[episode_id].time)
         full_matches = [
             episode.id
@@ -274,7 +386,10 @@ def _build_r_candidates(
             if sum(feature in earlier.tokens for feature in cue) == 2
         }
         candidates.append(
-            (episode_id, target, partner, place, answer, len(competitor_episodes))
+            (
+                episode_id, target, partner, place, answer,
+                len(competitor_episodes), from_superseding,
+            )
         )
     return candidates
 
@@ -283,21 +398,21 @@ def _query_r(
     step: int,
     target_step: int,
     episodes: tuple[Episode, ...],
-    candidates: list[tuple[int, str, str, str, str, int]],
+    candidates: list[tuple[int, str, str, str, str, int, bool]],
     rng: np.random.Generator,
     maximum_target: int | None = None,
+    required_candidate: tuple[int, str, str, str, str, int, bool] | None = None,
 ):
-    eligible = [
-        candidate
-        for candidate in candidates
+    eligible = ([required_candidate] if required_candidate is not None else [
+        candidate for candidate in candidates
         if candidate[0] <= step
         and (maximum_target is None or candidate[0] <= maximum_target)
-    ]
+    ])
     if not eligible:
         return None
     distances = np.asarray([abs(candidate[0] - target_step) for candidate in eligible])
     chosen = eligible[int(rng.choice(np.flatnonzero(distances == distances.min())))]
-    episode_id, target, partner, place, answer, competitor_count = chosen
+    episode_id, target, partner, place, answer, competitor_count, from_superseding = chosen
     episode = episodes[episode_id]
     tokens = ("Q", "CTX", partner, "AT", place, episode.time, "MOVED", "A")
     assert target not in tokens
@@ -308,6 +423,7 @@ def _query_r(
         episode_id,
         "reinstatement",
         competitor_count,
+        from_superseding,
     )
 
 
@@ -319,10 +435,13 @@ def generate_queries(
 ) -> tuple[tuple[Query, ...], tuple[dict[str, float], dict[str, float]]]:
     """Generate phase-shifted demand and queries interleaved after episodes."""
 
-    del grammar  # Query answers are ground truth; grammar is used by context solvers.
+    del grammar  # Labels are determined only by facts instantiated in the world.
+
     n_episodes = len(episodes)
     alpha = np.full(len(_DEMAND_KEYS), float(cfg["query_dirichlet_alpha"]))
-    weight_arrays = (rng.dirichlet(alpha), rng.dirichlet(alpha))
+    weight_arrays = tuple(
+        _floor_type_mixture(rng.dirichlet(alpha)) for _ in range(2)
+    )
     mixtures = tuple(
         {_key_name(key): float(weight) for key, weight in zip(_DEMAND_KEYS, weights, strict=True)}
         for weights in weight_arrays
@@ -367,8 +486,7 @@ def generate_queries(
     if len(forced_old_indices) < n_forced_old:
         raise RuntimeError("could not allocate the required old-query quota")
 
-    # Reserve existing Poisson emissions (without adding any) so conflict
-    # queries cover both relations and both MOVED operators are inspectable.
+    # Reserve existing Poisson emissions for conflict-query coverage.
     earliest_conflict = min(
         distinct[1][0]
         for events in histories["WORKS"].values()
@@ -379,19 +497,95 @@ def generate_queries(
         for index, step in enumerate(schedule)
         if step >= earliest_conflict and index not in forced_old_indices
     ]
-    forced_c_specs = (
-        (("WORKS", "CURRENT"), ("WORKS", "PREV"))
-        + (("MOVED", "CURRENT"),) * 3
-        + (("MOVED", "PREV"),) * 3
-    )
-    if len(coverage_candidates) < len(forced_c_specs):
-        raise RuntimeError("not enough Poisson emissions to cover both conflict relations")
-    forced_c_queries = {
-        index: spec
-        for index, spec in zip(
-            coverage_candidates[-len(forced_c_specs):], forced_c_specs, strict=True
+    if str(cfg["phase"]) == "eval":
+        unique_c_specs = sorted(
+            _unique_c_query_specs(histories), key=lambda item: (item[0], item[1][0])
         )
-    }
+        if len(unique_c_specs) < 300:
+            raise RuntimeError(
+                f"eval world supports only {len(unique_c_specs)} unique type-C queries; need 300"
+            )
+        unique_c_specs = unique_c_specs[:300]
+        latest_required_episode = max(item[0] for item in unique_c_specs)
+        forced_c_slots = [
+            index
+            for index, step in enumerate(schedule)
+            if latest_required_episode <= step
+            and index not in forced_old_indices
+        ]
+        if len(forced_c_slots) < len(unique_c_specs):
+            raise RuntimeError(
+                "not enough non-old Poisson emissions after conflict events to schedule "
+                "300 unique type-C queries"
+            )
+        forced_c_queries = {
+            index: spec
+            for index, (_, spec) in zip(
+                forced_c_slots[-len(unique_c_specs):], unique_c_specs, strict=True
+            )
+        }
+    else:
+        forced_c_specs = (
+            (("WORKS", "CURRENT"), ("WORKS", "PREV"))
+            + (("MOVED", "CURRENT"),) * 3
+            + (("MOVED", "PREV"),) * 3
+        )
+        if len(coverage_candidates) < len(forced_c_specs):
+            raise RuntimeError("not enough Poisson emissions to cover both conflict relations")
+        forced_c_queries = {
+            index: spec
+            for index, spec in zip(
+                coverage_candidates[-len(forced_c_specs):], forced_c_specs, strict=True
+            )
+        }
+
+    forced_r_queries: dict[int, tuple[int, str, str, str, str, int, bool]] = {}
+    forced_b_queries: dict[int, tuple[tuple[str, ...], str, tuple[int, ...], int, str]] = {}
+    if str(cfg["phase"]) == "eval":
+        unique_r: dict[tuple[str, str, str], tuple[int, str, str, str, str, int, bool]] = {}
+        for candidate in r_candidates:
+            episode_id, _target, partner, place, _answer, _competitors, _superseding = candidate
+            cue = (partner, place, episodes[episode_id].time)
+            unique_r.setdefault(cue, candidate)
+        if len(unique_r) < 250:
+            raise RuntimeError(
+                f"eval world supports only {len(unique_r)} unique type-R queries; need 250"
+            )
+        reserved_c = set(forced_c_queries)
+        available = [
+            index for index, step in enumerate(schedule)
+            if index not in forced_old_indices and index not in reserved_c
+        ]
+        target_r_count = 250
+        for candidate in list(unique_r.values()):
+            eligible_slot = next(
+                (index for index in available if schedule[index] >= candidate[0]), None
+            )
+            if eligible_slot is None:
+                continue
+            forced_r_queries[eligible_slot] = candidate
+            available.remove(eligible_slot)
+            if len(forced_r_queries) == target_r_count:
+                break
+        if len(forced_r_queries) < target_r_count:
+            raise RuntimeError(
+                f"not enough Poisson emissions to schedule {target_r_count} unique type-R queries"
+            )
+        b_specs = sorted(_unique_b_query_specs(histories, episodes), key=lambda item: (item[0], item[1][0]))
+        if len(b_specs) < 300:
+            raise RuntimeError(f"eval world supports only {len(b_specs)} unique type-B queries; need 300")
+        for told_episode, spec in b_specs:
+            eligible_slot = next(
+                (index for index in available if schedule[index] >= told_episode), None
+            )
+            if eligible_slot is None:
+                continue
+            forced_b_queries[eligible_slot] = spec
+            available.remove(eligible_slot)
+            if len(forced_b_queries) == 300:
+                break
+        if len(forced_b_queries) < 300:
+            raise RuntimeError("not enough Poisson emissions to schedule 300 unique type-B queries")
 
     queries: list[Query] = []
     shift_at = int(float(cfg["demand_shift_fraction"]) * n_episodes)
@@ -401,14 +595,27 @@ def generate_queries(
         target_step = max(0, step - sampled_lag)
         if schedule_index in forced_c_queries:
             query_type = "C"
-            relation, operator = forced_c_queries[schedule_index]
-            built = _query_c(
-                step,
-                histories,
-                rng,
-                required_relation=relation,
-                required_operator=operator,
+            forced_spec = forced_c_queries[schedule_index]
+            if str(cfg["phase"]) == "eval":
+                built = forced_spec
+            else:
+                relation, operator = forced_spec
+                built = _query_c(
+                    step,
+                    histories,
+                    rng,
+                    required_relation=relation,
+                    required_operator=operator,
+                )
+        elif schedule_index in forced_r_queries:
+            built = _query_r(
+                step, target_step, episodes, r_candidates, rng,
+                required_candidate=forced_r_queries[schedule_index],
             )
+            query_type = "R"
+        elif schedule_index in forced_b_queries:
+            built = forced_b_queries[schedule_index]
+            query_type = "B"
         elif schedule_index in forced_old_indices:
             maximum_target = step - old_age - 1
             built = _query_r(
@@ -424,13 +631,17 @@ def generate_queries(
             key_index = int(rng.choice(len(_DEMAND_KEYS), p=weight_arrays[half]))
             query_type, fact_class = _DEMAND_KEYS[key_index]
             if query_type == "A":
-                built = _query_a(fact_class, step, target_step, histories, rng)
+                built = _query_a(
+                    fact_class,
+                    step,
+                    target_step,
+                    histories,
+                    rng,
+                )
             elif query_type == "B":
-                built = _query_b(step, target_step, histories, rng)
+                built = _query_b(step, target_step, histories, episodes, rng)
             elif query_type == "C":
                 built = _query_c(step, histories, rng)
-            elif query_type == "D":
-                built = _query_d(step, histories, rng)
             elif query_type == "E":
                 built = _query_e(step, episodes, rng)
             else:
@@ -440,11 +651,18 @@ def generate_queries(
             built = _query_e(step, episodes, rng)
         if built is None:
             continue
-        if len(built) == 6:
+        if len(built) == 7:
+            (
+                tokens, answer, evidence, target_episode_id, actual_class,
+                competitor_count, from_superseding,
+            ) = built
+        elif len(built) == 6:
             tokens, answer, evidence, target_episode_id, actual_class, competitor_count = built
+            from_superseding = None
         else:
             tokens, answer, evidence, target_episode_id, actual_class = built
             competitor_count = None
+            from_superseding = None
         lag = step - target_episode_id if target_episode_id is not None else None
         queries.append(Query(
             id=len(queries),
@@ -458,6 +676,7 @@ def generate_queries(
             lag=lag,
             demand_half=half,
             competitor_count=competitor_count,
+            from_superseding=from_superseding,
         ))
     return tuple(queries), mixtures  # type: ignore[return-value]
 
@@ -467,9 +686,10 @@ def solve_query(
     episodes: tuple[Episode, ...],
     grammar: GrammarPrior,
 ) -> str:
-    """Symbolically solve a query using only its declared evidence and prior."""
+    """Symbolically solve a query using only its declared world evidence."""
 
-    del grammar  # Current Day-1 queries are all direct-evidence or unavailable cases.
+    del grammar
+
     evidence = [episodes[index] for index in query.evidence_episode_ids]
     tokens = query.tokens
     if query.query_type == "E":
@@ -482,12 +702,15 @@ def solve_query(
             for fact in episode.facts
             if fact.subject == entity and fact.relation == relation
         ]
-        return matches[-1].object
+        if matches:
+            return matches[-1].object
+        return "ABSTAIN"
     if query.query_type == "B":
-        subject, place = tokens[2], tokens[5]
+        subject, place, time = tokens[2], tokens[5], tokens[7]
         told = [
             fact
             for episode in evidence
+            if episode.time == time
             for fact in episode.facts
             if fact.subject == subject and fact.relation == "TOLD" and fact.extra == ("AT", place)
         ]
@@ -509,14 +732,6 @@ def solve_query(
         ]
         distinct = _distinct_events(matches)
         return distinct[-1 if operator == "CURRENT" else -2][1].object
-    if query.query_type == "D":
-        company = tokens[3]
-        state: dict[str, str] = {}
-        for episode in sorted(evidence, key=lambda item: item.id):
-            for fact in episode.facts:
-                if fact.relation == "WORKS":
-                    state[fact.subject] = fact.object
-        return f"N_{sum(value == company for value in state.values())}"
     if query.query_type == "R":
         partner, place, time = tokens[2], tokens[4], tokens[5]
         matches: list[str] = []
