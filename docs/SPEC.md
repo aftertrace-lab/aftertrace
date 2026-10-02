@@ -1,0 +1,219 @@
+# Aftertrace Stage 0 — Specification (v0.1)
+
+## 0. Question and currency
+
+Primary currency: **tokens placed in the reader's context per query (K)**.
+Secondary currencies: persistent store size (tokens and bits), retrieval
+operations per query, maintenance operations per step.
+
+Bytes are deliberately not primary: symbolic episodes are tiny, so raw
+storage is nearly free and would trivially favor raw offload. What is
+expensive in real systems is context injected per query.
+
+## 1. Repository layout
+
+```
+aftertrace/
+  world/       vocab.py grammar.py generator.py queries.py seeds.py
+  reader/      model.py data.py train.py
+  memory/      retriever.py render.py base.py conditions/*.py
+  accounting.py
+  eval/        harness.py stats.py figures.py
+configs/       world.yaml reader_*.yaml conditions.yaml sweep.yaml
+prereg/        PREREGISTRATION.md
+tests/
+runs/          (gitignored)
+```
+
+## 2. Vocabulary (symbolic, fixed, < 1,000 tokens)
+
+- Special: PAD BOS EOS SEP EP Q A ABSTAIN MASK GIST
+- Relations (12): WORKS MOVED JOINED_YEAR TOLD AT MET OWNS COLOR LIVES
+  STUDIED MANAGES SIBLING
+- Query operators: CURRENT PREV HOP2 COUNT CTX
+- Values: cities C_0..C_59, companies O_0..O_39, years Y_0..Y_29,
+  colors K_0..K_11, places P_0..P_19, counts N_0..N_15
+- Entities: E_0..E_511 (abstract slots, remapped per world/sequence)
+- Time buckets: T_0..T_63
+- Filler (incidental noise): F_0..F_63
+
+## 3. World generator
+
+A world is a pure function of `(seed, config)`.
+
+**Grammar prior (shared across all worlds — this is the "semantic
+knowledge").** Each company has a home city; each city has a typical place
+set; each company has a hiring-year window. Parameter `p_redundancy`
+controls how often facts follow the prior:
+- MOVED city = company's home city with prob `p_redundancy`, else uniform.
+- JOINED_YEAR within company window with prob `p_redundancy`.
+- AT place drawn from city's typical places with prob `p_redundancy`.
+Sweep `p_redundancy ∈ {0.2, 0.6, 0.9}`. Report all results per level.
+
+**Entities.** `n_entities = 400` per world, mapped to a random subset of
+E tokens.
+
+**Episodes.** Stream of `n_episodes = 2000`. Each episode: 1–3 entities,
+4–8 facts, 0–6 filler tokens, a time bucket. Fact classes:
+core relational (WORKS, MOVED), causal-linked (MOVED follows WORKS),
+temporal (JOINED_YEAR), social (TOLD/MET + AT), incidental (COLOR, OWNS).
+
+Rendered form:
+```
+EP T_12 E_7 WORKS O_3 SEP E_7 MOVED C_14 SEP E_7 TOLD E_22 AT P_5 SEP
+E_7 COLOR K_2 F_31 F_9 EOS
+```
+
+**Conflicts.** 15% of entities later get a superseding fact (second MOVED or
+WORKS) in a later episode.
+
+**Interference.** 10% of entities have a "sibling" sharing all relation
+objects except one slot.
+
+## 4. Queries
+
+Query types, rendered as `Q <operator/args> A` with answer token(s) after A:
+
+| Type | Example | Answer |
+|---|---|---|
+| A 1-hop | `Q E_7 MOVED A` | C_14 |
+| B 2-hop | `Q HOP2 E_7 TOLD P_5 WORKS A` | company of the entity E_7 told at P_5 |
+| C conflict | `Q E_7 MOVED PREV A` / `CURRENT` | earlier / latest value |
+| D count | `Q COUNT WORKS O_3 A` | N_k |
+| E unavailable | `Q E_7 STUDIED A` (never stated) | ABSTAIN |
+| R reinstatement | `Q CTX P_5 T_12 E_22 MOVED A` | target entity's city, cued by context features only |
+
+**Demand.** Per world, the mixture over (query type × fact class) is drawn
+from Dirichlet(α=0.5) — no fixed importance ordering. At stream midpoint the
+mixture is redrawn (demand shift). Query lag is heavy-tailed (log-uniform
+over 1..stream length); ≥10% of queries target items older than 90% of the
+stream.
+
+Queries are interleaved: after each episode, emit Poisson(λ=1.5) queries.
+Evaluation set: ≥5,000 queries per world.
+
+## 5. Abstention labels
+
+Target is ABSTAIN iff the context contains neither the fact nor any
+prior-predictive evidence for it (e.g., the company, for a MOVED query).
+If predictive evidence is present but the fact is absent, the target is the
+true answer — the reader is expected to reconstruct from the prior.
+
+## 6. Reader
+
+Decoder-only transformer, pre-norm RMSNorm, RoPE, no dropout, tied
+embeddings, loss on answer tokens only.
+
+Calibration sizes (approximate non-embedding params):
+
+| name | layers | d_model | heads | ffn | params |
+|---|---|---|---|---|---|
+| r2m | 4 | 192 | 6 | 768 | ~1.8M |
+| r5m | 6 | 256 | 8 | 1024 | ~4.7M |
+| r14m | 8 | 384 | 8 | 1536 | ~14M |
+| r31m | 10 | 512 | 8 | 2048 | ~31M |
+
+Context length 384. AdamW (β 0.9/0.95, wd 0.1), peak lr 6e-4 (scale ∝
+1/sqrt(d_model/256) for larger sizes), 1k warmup, cosine to 10%, batch 64,
+grad clip 1.0. Start with 15k steps; extend only if validation loss is still
+falling by >1% per 1k steps.
+
+**Training data** is generated on the fly from reader-training worlds:
+each sequence = shuffled context items + 1 query + answer. Context items mix
+**every representation format any condition can produce** (full episodes,
+fact-only, residual-coded, gist traces at every fidelity level, summaries),
+so no condition is out of distribution for the reader. Include
+distractor items and cases where evidence is missing (→ ABSTAIN).
+
+Entity remapping is redrawn for every training sequence.
+
+## 7. Memory representations (render.py)
+
+Continuous fidelity r ∈ [0,1], quantized to levels for rendering:
+
+| level | content |
+|---|---|
+| L4 | full episode incl. filler |
+| L3 | all facts, no filler |
+| L2 | facts above a utility-weight threshold |
+| L1 | anchor fact + relation keys with objects masked: `GIST E_7 WORKS O_3 MOVED MASK` |
+| L0 | deleted |
+
+Residual-coded rendering (condition 4): drop any fact the grammar prior
+predicts correctly (given other facts in the episode); keep only
+mispredicted facts. Lossless with respect to the prior.
+
+Summary rendering (condition 10): per-entity line of latest values,
+rewritten every 100 episodes.
+
+## 8. Retriever (shared)
+
+Item keys = set of non-filler tokens in the rendered item. Score = count of
+query tokens (excluding Q/A/operators) in key, ties broken by recency.
+Fill context greedily by score until K tokens. Retrieval ops = candidates
+scored × key length (counted, not timed).
+
+## 9. Conditions (conditions.yaml)
+
+1. `none` — empty context.
+2. `full_oracle` — all ground-truth-relevant episodes at L4, unbounded K
+   (ceiling).
+3. `raw_offload` — store everything at L4; retrieve top-k to K.
+4. `residual_offload` — store everything residual-coded; retrieve to K.
+5. `evict_{fifo,lru,freq}` — store budget B items at L3; retrieve to K.
+   Report the best of the family.
+6. `evict_learned` — per-item utility regressor (logistic, features:
+   age, use count, fact class, uniqueness) trained on policy-tuning worlds;
+   store budget B.
+7. `progressive` — each item has r_i; r decays by rule (below), renders at
+   its level; items with r_i < τ are latent and excluded from retrieval
+   unless the cue's candidate-set size ≤ c (cue gating); successful
+   retrieval refreshes r_i.
+8. `progressive_nogate` — 7 without cue gating.
+9. `progressive_uniform` — 7 with identical decay for all fact classes
+   (no utility model).
+10. `summary` — summaries only.
+
+Decay rules for 7 (run as sub-conditions): `time`, `recency_of_use`,
+`use_count`, `expected_utility` (fact-class weights from policy-tuning
+worlds). Learned decay is out of scope for Stage 0.
+
+Store budget B for 5–6 and the progressive store are matched in persistent
+tokens to the progressive condition's store at each sweep point.
+
+## 10. Accounting record (per query, aggregated per unit)
+
+`context_tokens`, `retrieval_ops`, `reconstruction_passes` (reader forward
+passes; normally 1), `store_tokens`, `store_bits` (tokens × log2|V|, plus
+metadata at 32 bits per field per item), `maintenance_ops_per_step`,
+`policy_params`, `wallclock_ms` (sanity only).
+
+## 11. Scoring
+
+Per query: +1 correct (including ABSTAIN on type E), 0 ABSTAIN on an
+answerable query, −1 wrong non-abstain answer (confabulation).
+Utility U = mean score. Also report plain accuracy and confabulation rate.
+
+## 12. Budget sweep
+
+K ∈ {384, 256, 128, 64, 32, 16}. Store budgets for eviction conditions
+matched per point.
+
+## 13. Statistics
+
+Unit = (world, reader_seed). All comparisons are paired within unit.
+Pilot: 4 worlds × 3 seeds. Fit `U ~ condition + (1|world) + (1|seed:world)`;
+simulate power for the pre-registered minimum effect; fix N before the main
+run. CIs by hierarchical bootstrap (resample worlds, then seeds within
+world), 10,000 resamples. Paired permutation test across units for p.
+
+Frontier metric: per unit, interpolate U(K) monotonically per condition;
+K* = budget achieving U = 0.9 × U(full_oracle); report mean log-ratio of K*
+between conditions with bootstrap CI, at 0.8/0.9/0.95.
+
+## 14. Figures
+
+Fig 1: U vs K (log x), one line per condition, bootstrap bands, faceted by
+p_redundancy.
+Fig 2: reinstatement — retrieval probability and correctness vs cue
+candidate-set size (1/2/4/8), by fidelity level; confabulation dashed.
