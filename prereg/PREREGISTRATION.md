@@ -63,3 +63,25 @@ accounting table to: ______________________ (fill in before the main run).
 ## Amendments
 
 (none)
+
+### 2026-10-02 — Query emission rate
+
+Before reader training or condition evaluation, increase the interleaved query
+emission rate from Poisson(λ=1.5) to Poisson(λ=3.0). With 2,000 episodes this
+meets the pre-specified ≥5,000-query evaluation-set size without adding
+non-Poisson floor-fill emissions.
+
+### 2026-10-02 — Day 1 generator review
+
+Before reader training or condition evaluation, require within-episode fact-key
+uniqueness; give OWNS a distinct J-token vocabulary; tighten type B and C
+provenance to their causal episodes; and define type R cues as unique
+partner/place/time triples with a logged earlier-competitor count. Conflicts are
+paired WORKS→MOVED superseding events in a strictly later time bucket.
+
+### 2026-10-02 — Restatement control
+
+Before reader training or condition evaluation, add `p_restate = 0.3` as the
+maximum realized fraction of sampled WORKS/MOVED events that exactly repeat an
+already-seen `(entity, relation, object)` fact. Log realized WORKS, MOVED, and
+combined restatement rates per world.

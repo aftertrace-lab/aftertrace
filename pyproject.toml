@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aftertrace"
+version = "0.1.0"
+description = "A controlled test bench for progressive episodic-memory demotion."
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "matplotlib",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["aftertrace*"]

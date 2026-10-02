@@ -32,7 +32,8 @@ runs/          (gitignored)
   STUDIED MANAGES SIBLING
 - Query operators: CURRENT PREV HOP2 COUNT CTX
 - Values: cities C_0..C_59, companies O_0..O_39, years Y_0..Y_29,
-  colors K_0..K_11, places P_0..P_19, counts N_0..N_15
+  colors K_0..K_11, places P_0..P_19, owned objects J_0..J_15,
+  counts N_0..N_15
 - Entities: E_0..E_511 (abstract slots, remapped per world/sequence)
 - Time buckets: T_0..T_63
 - Filler (incidental noise): F_0..F_63
@@ -50,11 +51,21 @@ controls how often facts follow the prior:
 - AT place drawn from city's typical places with prob `p_redundancy`.
 Sweep `p_redundancy ∈ {0.2, 0.6, 0.9}`. Report all results per level.
 
+Parameter `p_restate = 0.3` caps repeated identical WORKS/MOVED facts. When a
+sampled event would make the realized restatement fraction for either relation
+exceed `p_restate`, resample another fact.
+Forced initial and superseding events are not restatements. Each world logs the
+realized WORKS, MOVED, and combined restatement rates, where a restatement is a
+fact tuple `(entity, relation, object)` already observed in an earlier episode.
+
 **Entities.** `n_entities = 400` per world, mapped to a random subset of
 E tokens.
 
 **Episodes.** Stream of `n_episodes = 2000`. Each episode: 1–3 entities,
-4–8 facts, 0–6 filler tokens, a time bucket. Fact classes:
+4–8 facts, 0–6 filler tokens, a time bucket. Facts are sampled without
+replacement: an episode contains at most one fact for each (entity, relation)
+pair. `OWNS` objects use J tokens; P tokens are reserved for places following
+`AT`. Fact classes:
 core relational (WORKS, MOVED), causal-linked (MOVED follows WORKS),
 temporal (JOINED_YEAR), social (TOLD/MET + AT), incidental (COLOR, OWNS).
 
@@ -64,8 +75,10 @@ EP T_12 E_7 WORKS O_3 SEP E_7 MOVED C_14 SEP E_7 TOLD E_22 AT P_5 SEP
 E_7 COLOR K_2 F_31 F_9 EOS
 ```
 
-**Conflicts.** 15% of entities later get a superseding fact (second MOVED or
-WORKS) in a later episode.
+**Conflicts.** 15% of entities later get a superseding event: a new episode
+contains both a new WORKS and a new MOVED. The new MOVED follows the new
+company's home-city prior with probability `p_redundancy`. Its time bucket is
+strictly later than the original event's bucket.
 
 **Interference.** 10% of entities have a "sibling" sharing all relation
 objects except one slot.
@@ -77,11 +90,22 @@ Query types, rendered as `Q <operator/args> A` with answer token(s) after A:
 | Type | Example | Answer |
 |---|---|---|
 | A 1-hop | `Q E_7 MOVED A` | C_14 |
-| B 2-hop | `Q HOP2 E_7 TOLD P_5 WORKS A` | company of the entity E_7 told at P_5 |
+| B 2-hop | `Q HOP2 E_7 TOLD AT P_5 WORKS A` | company of the entity E_7 told at P_5, from a distinct earlier episode |
 | C conflict | `Q E_7 MOVED PREV A` / `CURRENT` | earlier / latest value |
 | D count | `Q COUNT WORKS O_3 A` | N_k |
 | E unavailable | `Q E_7 STUDIED A` (never stated) | ABSTAIN |
-| R reinstatement | `Q CTX P_5 T_12 E_22 MOVED A` | target entity's city, cued by context features only |
+| R reinstatement | `Q CTX E_7 AT P_5 T_12 MOVED A` | target entity's city, cued by its interaction partner, place, and time; the target is omitted |
+
+Type B targets exclude entities with superseding events, and every B query's
+TOLD episode is strictly later than its separate WORKS evidence episode. Type C
+is restricted to superseded entities and lists every prior episode containing
+the queried relation for that entity as evidence.
+
+For type R, the evidence episode contains a TOLD or MET interaction and the
+other participant's MOVED fact. The cue is the partner entity, interaction
+place, and episode time bucket; the full cue identifies exactly one stream
+episode. Each R query records `competitor_count`, the number of earlier episodes
+whose interaction cue matches exactly two of those three features.
 
 **Demand.** Per world, the mixture over (query type × fact class) is drawn
 from Dirichlet(α=0.5) — no fixed importance ordering. At stream midpoint the
@@ -89,7 +113,7 @@ mixture is redrawn (demand shift). Query lag is heavy-tailed (log-uniform
 over 1..stream length); ≥10% of queries target items older than 90% of the
 stream.
 
-Queries are interleaved: after each episode, emit Poisson(λ=1.5) queries.
+Queries are interleaved: after each episode, emit Poisson(λ=3.0) queries.
 Evaluation set: ≥5,000 queries per world.
 
 ## 5. Abstention labels

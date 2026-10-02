@@ -1,0 +1,47 @@
+# Shared grammar prior (SPEC section 3).
+grammar_seed: 1729
+# DECISION: Four typical places and an eight-year inclusive hiring window give
+# the prior useful structure without making either mapping nearly exhaustive.
+typical_places_per_city: 4
+hiring_window_years: 8
+
+# World phase and redundancy sweep (SPEC sections 3-4).
+phase: eval
+p_redundancy: 0.6
+p_redundancy_levels: [0.2, 0.6, 0.9]
+# Maximum realized fraction of WORKS/MOVED facts that may exactly repeat an
+# already-seen fact; excess repeated candidates are resampled.
+p_restate: 0.3
+n_entities: 400
+entity_vocab_size: 512
+n_episodes: 2000
+min_entities_per_episode: 1
+max_entities_per_episode: 3
+min_facts_per_episode: 4
+max_facts_per_episode: 8
+min_filler_tokens: 0
+max_filler_tokens: 6
+n_time_buckets: 64
+conflict_fraction: 0.15
+interference_fraction: 0.10
+# DECISION: The SPEC names fact classes but not their sampling weights. Equal
+# weights keep every class common enough for query generation and testing.
+fact_relation_weights:
+  WORKS: 1.0
+  MOVED: 1.0
+  JOINED_YEAR: 1.0
+  TOLD: 1.0
+  MET: 1.0
+  COLOR: 1.0
+  OWNS: 1.0
+
+# Query demand, timing, and lag distribution (SPEC section 4).
+query_dirichlet_alpha: 0.5
+query_poisson_lambda: 3.0
+query_min_eval: 5000
+demand_shift_fraction: 0.5
+lag_min: 1
+# null means the stream length.
+lag_max: null
+old_query_min_fraction: 0.10
+old_query_age_fraction: 0.90
