@@ -276,7 +276,7 @@ class OracleReader:
             if fact.relation == "MOVED" and fact.object is not None:
                 moved_by_episode.setdefault(fact.episode_id, {})[fact.subject] = fact
 
-        candidates: list[tuple[int, str]] = []
+        candidates: dict[int | None, str] = {}
         for interaction in facts:
             if interaction.relation not in {"TOLD", "MET"} or interaction.object is None:
                 continue
@@ -288,17 +288,13 @@ class OracleReader:
                 interaction.extra == ("AT", place),
                 interaction.time == time,
             ))
-            if matched:
-                candidates.append((matched, str(moved.object)))
+            # Partial cues are not enough to reinstate a value: a newly added
+            # near-match must not turn a safe abstention into a guess.
+            if matched == 3:
+                candidates[interaction.episode_id] = str(moved.object)
         if not candidates:
             return OraclePrediction("ABSTAIN", 0.0)
-        best_match = max(score for score, _ in candidates)
-        best = [answer for score, answer in candidates if score == best_match]
-        counts: dict[str, int] = {}
-        for answer in best:
-            counts[answer] = counts.get(answer, 0) + 1
-        answer, count = max(counts.items(), key=lambda pair: pair[1])
-        confidence = (count / len(best)) * (best_match / 3.0)
-        if confidence <= 0.5:
-            return OraclePrediction("ABSTAIN", confidence, len(best))
-        return OraclePrediction(answer, confidence, len(best))
+        answers = set(candidates.values())
+        if len(answers) != 1:
+            return OraclePrediction("ABSTAIN", 0.0, len(candidates))
+        return OraclePrediction(next(iter(answers)), 1.0, len(candidates))
