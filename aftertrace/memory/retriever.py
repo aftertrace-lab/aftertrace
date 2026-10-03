@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from collections import defaultdict
+from typing import Callable, Sequence
 
 from aftertrace.memory.base import ItemView, MemoryItem
 
@@ -48,34 +49,79 @@ def retrieve(
     is skipped and later smaller items may still fill the remaining budget.
     """
 
-    if budget < 0:
-        raise ValueError("retrieval budget K must be non-negative")
-    views: list[ItemView] = []
-    for candidate in candidates:
-        if isinstance(candidate, ItemView):
-            view = candidate
-            if render is not None:
-                view = ItemView(view.item, render(view.item))
-        else:
-            view = ItemView(candidate, render(candidate) if render else candidate.tokens)
-        views.append(view)
+    return SharedRetriever().retrieve(candidates, query_tokens, budget, render=render)
 
-    ranked: list[tuple[int, int, ItemView]] = []
-    operations = 0
-    for view in views:
-        key = item_key(view.key_tokens if view.key_tokens is not None else view.tokens)
-        operations += len(key)
-        score = len(query_features(query_tokens) & key)
-        ranked.append((score, view.item.episode_id, view))
-    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
 
-    selected: list[ItemView] = []
-    used = 0
-    for _score, _recency, view in ranked:
-        item_length = len(view.tokens)
-        if not item_length or used + item_length > budget:
-            continue
-        selected.append(view)
-        used += item_length
-    assert used <= budget
-    return RetrievalResult(tuple(selected), operations, used)
+class SharedRetriever:
+    """Incremental inverted-index retriever shared across a stream evaluation."""
+
+    def __init__(self) -> None:
+        self._keys: dict[int, frozenset[str]] = {}
+        self._postings: dict[str, set[int]] = defaultdict(set)
+
+    def retrieve(
+        self,
+        candidates: Sequence[ItemView] | Sequence[MemoryItem],
+        query_tokens: Sequence[str],
+        budget: int,
+        *,
+        render: Callable[[MemoryItem], tuple[str, ...]] | None = None,
+    ) -> RetrievalResult:
+        if budget < 0:
+            raise ValueError("retrieval budget K must be non-negative")
+        views: list[ItemView] = []
+        for candidate in candidates:
+            if isinstance(candidate, ItemView):
+                view = candidate
+                if render is not None:
+                    view = ItemView(view.item, render(view.item))
+            else:
+                view = ItemView(candidate, render(candidate) if render else candidate.tokens)
+            views.append(view)
+
+        active = {id(view.item): view for view in views}
+        stale = self._keys.keys() - active.keys()
+        for item_id in stale:
+            for token in self._keys.pop(item_id):
+                self._postings[token].discard(item_id)
+        operations = 0
+        for item_id, view in active.items():
+            if isinstance(view.key_tokens, frozenset):
+                key = view.key_tokens
+            elif view.key_tokens is None:
+                key = view.item.retrieval_key or item_key(view.tokens)
+            else:
+                key = item_key(view.key_tokens)
+            operations += len(key)
+            if item_id not in self._keys:
+                self._keys[item_id] = key
+                for token in key:
+                    self._postings[token].add(item_id)
+
+        scores: dict[int, int] = defaultdict(int)
+        for token in query_features(query_tokens):
+            for item_id in self._postings.get(token, ()):
+                if item_id in active:
+                    scores[item_id] += 1
+        positive = [
+            active[item_id] for item_id, score in scores.items() if score > 0
+        ]
+        positive.sort(
+            key=lambda view: (scores[id(view.item)], view.item.episode_id),
+            reverse=True,
+        )
+        positive_ids = {id(view.item) for view in positive}
+        # All zero-score candidates tie on lexical score, so recency alone ranks
+        # them; episode stores expose chronological order.
+        zero = [view for view in reversed(views) if id(view.item) not in positive_ids]
+        selected: list[ItemView] = []
+        used = 0
+        for view in (*positive, *zero):
+            item_length = len(view.tokens)
+            if item_length and used + item_length <= budget:
+                selected.append(view)
+                used += item_length
+            if used == budget:
+                break
+        assert used <= budget
+        return RetrievalResult(tuple(selected), operations, used)

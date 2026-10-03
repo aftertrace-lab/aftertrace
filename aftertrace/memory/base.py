@@ -21,11 +21,19 @@ class MemoryItem:
     last_access: int = 0
     use_count: int = 0
     fidelity: float = 1.0
+    fidelity_step: int = 0
     level: int = 4
     uniqueness: float = 0.0
     fact_classes: tuple[str, ...] = ()
     fact_class_score: float = 0.0
     reconstruction_passes: int = 0
+    retrieval_key: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.retrieval_key is None:
+            self.retrieval_key = frozenset(
+                token for token in self.tokens if not token.startswith("F_")
+            )
 
     @property
     def token_count(self) -> int:
@@ -38,7 +46,7 @@ class ItemView:
 
     item: MemoryItem
     tokens: tuple[str, ...]
-    key_tokens: tuple[str, ...] | None = None
+    key_tokens: tuple[str, ...] | frozenset[str] | None = None
 
 
 class MemoryCondition:

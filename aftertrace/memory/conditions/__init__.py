@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any
 
 from aftertrace.memory.base import ItemView, MemoryCondition, MemoryItem
@@ -24,22 +23,6 @@ class EpisodeStore(MemoryCondition):
             return
         if self.name == "full_oracle":
             return
-        if self.name.startswith("progressive"):
-            rate = float(self.params.get("decay_rate", 0.01))
-            rule = self.params.get("decay_rule", "time")
-            for old in self.items:
-                delta = max(0, step - old.created_at)
-                if rule == "use_count":
-                    decay = rate * old.use_count
-                elif rule == "recency_of_use":
-                    decay = rate * max(0, step - old.last_access)
-                elif rule == "expected_utility":
-                    weights = self.params.get("utility_weights", {})
-                    weight = sum(float(weights.get(c, 0.5)) for c in old.fact_classes) / max(1, len(old.fact_classes))
-                    decay = rate * delta / max(0.1, weight)
-                else:
-                    decay = rate * delta
-                old.fidelity = max(0.0, old.fidelity - decay)
         if self.name.startswith("evict_"):
             tokens, level = render_l3(episode), 3
         elif self.name == "residual_offload":
@@ -53,7 +36,7 @@ class EpisodeStore(MemoryCondition):
         self.items.append(MemoryItem(
             key=str(episode.id), episode_id=episode.id, tokens=tokens,
             source_episode=episode, created_at=step, last_access=step,
-            fidelity=1.0, level=level, uniqueness=uniqueness,
+            fidelity=1.0, fidelity_step=step, level=level, uniqueness=uniqueness,
             fact_classes=classes, fact_class_score=class_score,
         ))
         self._enforce_budget()
@@ -74,21 +57,34 @@ class EpisodeStore(MemoryCondition):
             self.items.remove(victim)
 
     def views(self, query: Any, step: int) -> list[ItemView]:
-        del step
-        if self.name in {"none", "summary", "full_oracle"}:
+        if self.name in {"none", "full_oracle"}:
             return []
         result = []
+        query_key = set(query.tokens)
         candidate_count = sum(
-            bool(set(query.tokens) & set(item.tokens)) for item in self.items
+            bool(query_key & item.retrieval_key) for item in self.items
         )
         for item in self.items:
             tokens = item.tokens
             if self.name.startswith("progressive"):
+                rate = float(self.params.get("decay_rate", 0.01))
+                rule = self.params.get("decay_rule", "time")
+                if rule == "use_count":
+                    decay = rate * max(0, step - item.fidelity_step) * item.use_count
+                elif rule == "recency_of_use":
+                    decay = rate * max(0, step - item.last_access)
+                elif rule == "expected_utility":
+                    weights = self.params.get("utility_weights", {})
+                    weight = sum(float(weights.get(c, 0.5)) for c in item.fact_classes) / max(1, len(item.fact_classes))
+                    decay = rate * max(0, step - item.fidelity_step) / max(0.1, weight)
+                else:
+                    decay = rate * max(0, step - item.fidelity_step)
+                fidelity = max(0.0, item.fidelity - decay)
                 threshold = float(self.params.get("tau", 0.7))
                 gated = self.name != "progressive_nogate"
-                if item.fidelity < threshold and gated and candidate_count > int(self.params.get("c", 3)):
+                if fidelity < threshold and gated and candidate_count > int(self.params.get("c", 3)):
                     continue
-                level = min(4, int(item.fidelity * 5))
+                level = min(4, int(fidelity * 5))
                 if item.source_episode is not None:
                     tokens = render_level(
                         item.source_episode, level,
@@ -96,7 +92,7 @@ class EpisodeStore(MemoryCondition):
                     )
                 else:
                     continue
-            result.append(ItemView(item, tokens, item.tokens))
+            result.append(ItemView(item, tokens, item.retrieval_key))
         return result
 
     @staticmethod
@@ -108,6 +104,7 @@ class EpisodeStore(MemoryCondition):
         if successful and self.name.startswith("progressive"):
             for view in selected:
                 view.item.fidelity = 1.0
+                view.item.fidelity_step = step
 
 
 def _query_render(item: MemoryItem, query: Any) -> tuple[str, ...]:
