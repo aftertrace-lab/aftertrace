@@ -1,0 +1,29 @@
+# Stage 0 symbolic-oracle conditions. Store budgets are matched per sweep point.
+none: {}
+full_oracle: {}
+raw_offload: {}
+raw_offload_qrender: {}
+residual_offload: {}
+evict_fifo: {}
+evict_lru: {}
+evict_freq: {}
+evict_learned: {}
+progressive:
+  tau: 0.7
+  c: 3
+  decay_rule: recency_of_use
+  decay_rate: 0.01
+  utility_weights: {}
+progressive_nogate:
+  tau: 0.7
+  decay_rule: recency_of_use
+  decay_rate: 0.01
+  utility_weights: {}
+progressive_uniform:
+  tau: 0.7
+  c: 3
+  decay_rule: time
+  decay_rate: 0.01
+  utility_weights: {}
+summary:
+  summary_interval: 100

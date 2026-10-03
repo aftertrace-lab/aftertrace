@@ -1,0 +1,25 @@
+name: r5m
+device: auto
+n_layers: 6
+d_model: 256
+n_heads: 8
+ffn_dim: 1024
+context_length: 384
+batch_size: 64
+peak_lr: 0.0006
+warmup_steps: 1000
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+summary_period: 100
+min_distractors: 2
+max_distractors: 6
+l2_threshold: 0.5
+l2_utility_weights:
+  core_relational: 1.0
+  causal_linked: 1.0
+  temporal: 0.8
+  social: 0.6
+  interference: 0.4
+  incidental: 0.2

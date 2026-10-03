@@ -114,3 +114,12 @@ full-cue uniqueness is scarcer at high redundancy; 275 observed at p=0.9.
 Log `from_superseding` on each R query so reinstatement results can be separated
 by superseding-event provenance. H3 must also hold on R queries with
 `from_superseding = False`.
+
+### 2026-10-02 — Oracle-reader pre-check
+
+Before any reader training, all conditions are evaluated with a symbolic
+optimal reader. If the K* ratio of progressive (best decay rule, tuned on
+policy-tune worlds) versus the best of `raw_offload` and `raw_offload_qrender`
+is < 1.2× at every `p_redundancy` level and every K, Stage 0 stops: the mechanism
+lacks information-theoretic headroom. If ≥ 1.5× at any level, proceed to reader
+training. Between 1.2× and 1.5×, proceed with reduced priority.

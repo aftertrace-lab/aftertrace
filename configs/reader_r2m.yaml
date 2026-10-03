@@ -1,0 +1,25 @@
+name: r2m
+device: auto
+n_layers: 4
+d_model: 192
+n_heads: 6
+ffn_dim: 768
+context_length: 384
+batch_size: 64
+peak_lr: 0.00069282  # 6e-4 / sqrt(192/256)
+warmup_steps: 1000
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+summary_period: 100
+min_distractors: 2
+max_distractors: 6
+l2_threshold: 0.5
+l2_utility_weights: &utility
+  core_relational: 1.0
+  causal_linked: 1.0
+  temporal: 0.8
+  social: 0.6
+  interference: 0.4
+  incidental: 0.2

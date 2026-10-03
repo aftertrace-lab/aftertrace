@@ -230,6 +230,12 @@ scored × key length (counted, not timed).
 9. `progressive_uniform` — 7 with identical decay for all fact classes
    (no utility model).
 10. `summary` — summaries only.
+11. `raw_offload_qrender` — store raw L4 episodes and retrieve with the same
+    shared item scorer, but render each selected item with only facts whose
+    `(entity, relation)` or interaction-cue features match the query. The
+    persistent store and item keys remain raw L4; only the retrieved view is
+    query-rendered. This isolates query-conditioned rendering from storage
+    compression.
 
 Decay rules for 7 (run as sub-conditions): `time`, `recency_of_use`,
 `use_count`, `expected_utility` (fact-class weights from policy-tuning
@@ -237,6 +243,8 @@ worlds). Learned decay is out of scope for Stage 0.
 
 Store budget B for 5–6 and the progressive store are matched in persistent
 tokens to the progressive condition's store at each sweep point.
+Condition 11 is reported alongside `raw_offload` in the oracle-reader
+pre-check as the query-rendered raw baseline.
 
 ## 10. Accounting record (per query, aggregated per unit)
 
