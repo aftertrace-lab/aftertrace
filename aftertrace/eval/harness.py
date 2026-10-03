@@ -107,16 +107,18 @@ def evaluate_condition(
             query_started = perf_counter()
             if condition_name == "full_oracle":
                 views = _full_oracle_views(world, query)
-                retrieval_ops = sum(len(v.tokens) for v in views)
-                selected = views
-                context_tokens = sum(len(v.tokens) for v in views)
+                oracle_budget = sum(len(view.tokens) for view in views)
+                selected, retrieval_ops = _retrieve_two_hop(
+                    retriever, views, query.tokens, oracle_budget
+                )
+                context_tokens = sum(len(view.tokens) for view in selected)
             else:
                 views = condition.views(query, episode.id)
-                retrieved = retriever.retrieve(views, query.tokens, K)
-                selected = list(retrieved.selected)
+                selected, retrieval_ops = _retrieve_two_hop(
+                    retriever, views, query.tokens, K
+                )
                 if condition_name == "raw_offload_qrender":
                     selected = [condition.render_retrieved(view, query) for view in selected]
-                retrieval_ops = retrieved.retrieval_ops
                 context_tokens = sum(len(view.tokens) for view in selected)
             prediction = oracle.predict(
                 selected, query, world.grammar, float(world.config["p_redundancy"])
@@ -171,6 +173,23 @@ def evaluate_condition(
         per_type,
         {key: value / count for key, value in sum_fields.items()},
     )
+
+
+def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
+    """Expand the query once with entities found in its first retrieved view."""
+
+    first = retriever.retrieve(views, query_tokens, budget)
+    entities = {
+        token
+        for view in first.selected
+        for token in view.tokens
+        if token.startswith("E_")
+    }
+    expanded = tuple(query_tokens) + tuple(sorted(entities - set(query_tokens), key=lambda token: int(token[2:])))
+    second = retriever.retrieve(views, expanded, budget)
+    if second.context_tokens > budget:
+        raise AssertionError(f"two-hop context {second.context_tokens} exceeds K={budget}")
+    return list(second.selected), first.retrieval_ops + second.retrieval_ops
 
 
 def tune_parameters(

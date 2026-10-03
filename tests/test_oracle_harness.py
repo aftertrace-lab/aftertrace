@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from aftertrace.eval.harness import evaluate_condition, tune_parameters
+from aftertrace.eval.harness import _retrieve_two_hop, evaluate_condition, tune_parameters
+from aftertrace.memory.base import ItemView, MemoryItem
 from aftertrace.memory.conditions import make_condition
 from aftertrace.reader.oracle import OracleReader
 from scripts.oracle_frontier import _frontier_k, _ratio_bound
@@ -39,6 +40,37 @@ def test_context_never_exceeds_budget(eval_world):
         condition_config={"raw_offload": {}}, queries=[query],
     )
     assert result.results[0].accounting.context_tokens <= 384
+
+
+def test_two_hop_retrieval_expands_entities_and_charges_both_passes():
+    first_item = ItemView(
+        MemoryItem("first", 4, ("EP", "T_0", "E_11", "TOLD", "E_9", "EOS"), None),
+        ("EP", "T_0", "E_11", "TOLD", "E_9", "EOS"),
+    )
+    second_item = ItemView(
+        MemoryItem("second", 3, ("EP", "T_1", "E_9", "WORKS", "O_2", "EOS"), None),
+        ("EP", "T_1", "E_9", "WORKS", "O_2", "EOS"),
+    )
+
+    class TrackingRetriever:
+        def __init__(self):
+            self.calls = []
+
+        def retrieve(self, views, query_tokens, budget):
+            self.calls.append((tuple(query_tokens), budget))
+            selected = (first_item,) if len(self.calls) == 1 else (second_item,)
+            return type("Result", (), {"selected": selected, "retrieval_ops": 7, "context_tokens": 6})()
+
+    retriever = TrackingRetriever()
+    selected, retrieval_ops = _retrieve_two_hop(
+        retriever, [first_item, second_item], ("Q", "E_4", "WORKS", "A"), 8
+    )
+    assert retriever.calls == [
+        (("Q", "E_4", "WORKS", "A"), 8),
+        (("Q", "E_4", "WORKS", "A", "E_9", "E_11"), 8),
+    ]
+    assert selected == [second_item]
+    assert retrieval_ops == 14
 
 
 def test_tuning_rejects_eval_world_before_using_it(eval_world):
