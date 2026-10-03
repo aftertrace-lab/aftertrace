@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from aftertrace.eval.harness import evaluate_condition, tune_parameters
+from aftertrace.run_metadata import record_run_provenance, require_clean_tree
 from aftertrace.world.generator import make_world
 
 CONDITIONS = (
@@ -63,7 +64,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "runs/oracle_frontier")
     parser.add_argument("--worlds", type=int, default=None, help="override eval worlds per redundancy level")
     parser.add_argument("--resume", action="store_true", help="resume complete worlds from partial CSVs")
+    parser.add_argument("--allow-dirty", action="store_true", help="run from a dirty tree and record that provenance")
     args = parser.parse_args()
+    provenance = require_clean_tree(REPO_ROOT, allow_dirty=args.allow_dirty)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    record_run_provenance(args.output_dir, provenance)
     world_cfg = yaml.safe_load(args.world_config.read_text(encoding="utf-8"))
     condition_cfg = yaml.safe_load(args.conditions_config.read_text(encoding="utf-8"))
     sweep = yaml.safe_load(args.sweep_config.read_text(encoding="utf-8"))
@@ -78,7 +83,6 @@ def main() -> None:
         policy_worlds.append(make_world(seed, tune_cfg))
     tuned = tune_parameters(policy_worlds, condition_cfg, sweep["tuning"], budgets)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     rows = _load_partial(args.output_dir / "frontier.partial.csv") if args.resume else []
     details = _load_partial(args.output_dir / "per_type.partial.csv") if args.resume else []
     complete_seeds = {

@@ -30,6 +30,7 @@ from aftertrace.memory.render import render_l4
 from aftertrace.reader.data import ReaderDataGenerator
 from aftertrace.reader.model import ReaderModel, count_parameters
 from aftertrace.reader.train import build_training, run_steps, select_device
+from aftertrace.run_metadata import record_run_provenance, require_clean_tree
 from aftertrace.world.generator import World, make_world
 from aftertrace.world.queries import Query
 from aftertrace.world.vocab import TOKENS, TOKEN_TO_ID
@@ -81,6 +82,7 @@ def train_one(
     output_root: Path,
     *,
     batch_size: int | None = None,
+    run_provenance: dict[str, Any] | None = None,
 ) -> tuple[ReaderModel, dict[str, Any], Path, int]:
     config_path = REPO_ROOT / "configs" / f"reader_{size}.yaml"
     reader_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -88,6 +90,8 @@ def train_one(
         reader_cfg["batch_size"] = batch_size
     run_dir = output_root / f"{size}_seed{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    if run_provenance is not None:
+        record_run_provenance(run_dir, run_provenance)
     checkpoint_path = run_dir / "checkpoint.pt"
 
     torch.manual_seed(seed)
@@ -457,7 +461,9 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=15_000)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "runs" / "calibration")
+    parser.add_argument("--allow-dirty", action="store_true", help="run from a dirty tree and record that provenance")
     args = parser.parse_args()
+    provenance = require_clean_tree(REPO_ROOT, allow_dirty=args.allow_dirty)
 
     sizes = ["r2m"] if args.smoke else list(args.sizes)
     seeds = [11] if args.smoke else list(args.seeds)
@@ -467,6 +473,7 @@ def main() -> None:
     per_type = 2 if args.smoke else 300
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    record_run_provenance(output_dir, provenance)
 
     world_cfg = yaml.safe_load((REPO_ROOT / "configs/world.yaml").read_text(encoding="utf-8"))
     model_parameters: dict[str, int] = {}
@@ -483,6 +490,7 @@ def main() -> None:
                 world_cfg,
                 output_dir / "runs",
                 batch_size=8 if args.smoke else None,
+                run_provenance=provenance,
             )
             model_parameters[size] = parameter_count
             torch.save(model.state_dict(), run_dir / "model.pt")

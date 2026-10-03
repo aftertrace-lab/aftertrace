@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import platform
 import resource
-import subprocess
 import sys
 import time
 
@@ -29,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from aftertrace.reader.data import ReaderDataGenerator
 from aftertrace.reader.model import ReaderModel, config_for_size, count_parameters
+from aftertrace.run_metadata import record_run_provenance, require_clean_tree
 from aftertrace.world.generator import make_world
 from aftertrace.world.vocab import TOKENS
 
@@ -63,7 +63,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--allow-dirty", action="store_true", help="run from a dirty tree and record that provenance")
     args = parser.parse_args()
+    provenance = require_clean_tree(REPO_ROOT, allow_dirty=args.allow_dirty)
 
     with (REPO_ROOT / "configs" / "world.yaml").open(encoding="utf-8") as handle:
         world_config = yaml.safe_load(handle)
@@ -107,14 +109,7 @@ def main() -> None:
     }
     with (output_dir / "resolved_config.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(resolved, handle, sort_keys=True)
-    commit = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    (output_dir / "git_commit.txt").write_text(commit + "\n", encoding="utf-8")
+    record_run_provenance(output_dir, provenance)
     (output_dir / "seeds.json").write_text(
         json.dumps({"run_seed": args.seed, "world_seed": args.seed}, indent=2) + "\n",
         encoding="utf-8",

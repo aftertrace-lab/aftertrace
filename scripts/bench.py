@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+import json
 import os
 from pathlib import Path
 import platform
@@ -24,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 from aftertrace.reader.data import ReaderDataGenerator
 from aftertrace.reader.model import ReaderModel, config_for_size
 from aftertrace.reader.train import autocast_context, peak_memory_mb, select_device
+from aftertrace.run_metadata import record_run_provenance, require_clean_tree
 from aftertrace.world.generator import make_world
 from aftertrace.world.vocab import TOKENS
 
@@ -50,7 +53,13 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--allow-dirty", action="store_true", help="run from a dirty tree and record that provenance")
     args = parser.parse_args()
+    provenance = require_clean_tree(REPO_ROOT, allow_dirty=args.allow_dirty)
+    run_dir = args.output_dir or REPO_ROOT / "runs" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_bench"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    record_run_provenance(run_dir, provenance)
 
     reader_cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     world_cfg = yaml.safe_load(args.world_config.read_text(encoding="utf-8"))
@@ -143,7 +152,27 @@ def main() -> None:
     mean_step = total_measured / max(1, args.steps)
     print(f"  step_total: {mean_step:.4f} s ({1000 * mean_step:.2f} ms)")
     print(f"steps/sec: {1 / mean_step:.4f}")
-    print(f"peak memory (MiB): {peak_memory_mb(device):.1f}")
+    memory = peak_memory_mb(device)
+    print(f"peak memory (MiB): {memory:.1f}")
+    summary = {
+        "device": str(device),
+        "steps": args.steps,
+        "warmup_steps": args.warmup_steps,
+        "batch_size": batch_size,
+        "threads": args.threads,
+        "steps_per_second": 1 / mean_step,
+        "peak_memory_mib": memory,
+        "setup_seconds": {
+            "world_generation": world_generation,
+            "data_setup_and_summary_cache": data_setup,
+            "model_and_optimizer": model_setup,
+        },
+        "mean_step_seconds": {
+            key: sum(values) / max(1, len(values)) for key, values in stages.items()
+        },
+        "run_dir": str(run_dir),
+    }
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

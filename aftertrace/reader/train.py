@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from aftertrace.reader.data import ReaderDataGenerator
 from aftertrace.reader.model import ReaderModel, config_for_size
+from aftertrace.run_metadata import record_run_provenance, require_clean_tree
 from aftertrace.world.generator import make_world
 from aftertrace.world.vocab import TOKENS
 
@@ -149,7 +150,11 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-dir", type=Path, default=REPO_ROOT / "runs/checkpoints")
+    parser.add_argument("--allow-dirty", action="store_true", help="run from a dirty tree and record that provenance")
     args = parser.parse_args()
+    provenance = require_clean_tree(REPO_ROOT, allow_dirty=args.allow_dirty)
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    record_run_provenance(args.checkpoint_dir, provenance)
     reader_cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     world_cfg = yaml.safe_load(args.world_config.read_text(encoding="utf-8"))
     device = select_device(args.device or str(reader_cfg.get("device", "auto")))
@@ -158,7 +163,6 @@ def main() -> None:
     losses, elapsed = run_steps(
         model, data, optimizer, reader_cfg, device, args.steps, progress_every=10
     )
-    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": args.steps},
         args.checkpoint_dir / f"{reader_cfg['name']}_step_{args.steps}.pt",
