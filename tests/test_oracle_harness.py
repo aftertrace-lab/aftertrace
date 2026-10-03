@@ -8,7 +8,7 @@ from aftertrace.eval.harness import _policy_query_sample, _retrieve_two_hop, eva
 from aftertrace.memory.base import ItemView, MemoryItem
 from aftertrace.memory.conditions import make_condition
 from aftertrace.reader.oracle import OracleReader
-from scripts.oracle_frontier import _frontier_k, _ratio_bound
+from scripts.oracle_frontier import _decision_from_pair_ratios, _frontier_k, _ratio_bound
 from aftertrace.world.generator import make_world
 
 
@@ -174,6 +174,14 @@ def test_frontier_reports_censored_kstar_and_ratio_bounds():
     assert k_star == 64 and censored
     assert _ratio_bound(384, True, 128, False, 384) == (3.0, ">")
     assert _ratio_bound(128, False, 384, True, 384) == (1 / 3, "<")
+
+
+def test_frontier_decision_accounts_for_every_censoring_bound():
+    exact_low = [{"ratio": 0.8, "bound": "="}, {"ratio": 1.19, "bound": "<"}]
+    assert _decision_from_pair_ratios(exact_low) == "STOP"
+    assert _decision_from_pair_ratios(exact_low + [{"ratio": 1.1, "bound": ">"}]) == "REDUCED"
+    assert _decision_from_pair_ratios(exact_low + [{"ratio": float("nan"), "bound": "interval"}]) == "REDUCED"
+    assert _decision_from_pair_ratios(exact_low + [{"ratio": 1.5, "bound": "="}]) == "PASS"
 
 
 def test_summary_exposes_snapshot_items_after_rewrite(eval_world):

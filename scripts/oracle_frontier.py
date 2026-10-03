@@ -158,20 +158,22 @@ def main() -> None:
     _plot(rows, levels, budgets, args.output_dir / "fig1_utility_vs_k.png")
 
     kstar_rows = []
-    ratio_rows = []
+    pair_ratio_rows = []
     print("K* ratios by p and utility target (best raw / progressive; >1 favors progressive)")
     for p in levels:
         for target in sweep["frontier_targets"]:
             kp, kp_censored = _frontier_k(rows, "progressive", float(p), float(target))
-            raw_pairs = [
-                _frontier_k(rows, name, float(p), float(target))
+            raw_pairs = {
+                name: _frontier_k(rows, name, float(p), float(target))
                 for name in ("raw_offload", "raw_offload_qrender")
-            ]
+            }
             # The best raw baseline is the one reaching the target at lower K;
             # a censored baseline is conservatively treated as > max K.
-            kr, kr_censored = min(raw_pairs, key=lambda pair: float("inf") if pair[1] else pair[0])
+            kr, kr_censored = min(
+                raw_pairs.items(),
+                key=lambda pair: float("inf") if pair[1][1] else pair[1][0],
+            )[1]
             ratio, relation = _ratio_bound(kr, kr_censored, kp, kp_censored, max(budgets))
-            ratio_rows.append({"p_redundancy": p, "target": target, "ratio": ratio, "bound": relation})
             kstar_rows.extend([
                 {"p_redundancy": p, "target": target, "condition": "progressive", "K_star": kp, "censored": kp_censored},
                 {"p_redundancy": p, "target": target, "condition": "best_raw", "K_star": kr, "censored": kr_censored},
@@ -183,19 +185,26 @@ def main() -> None:
                 else "indeterminate (both censored)"
             )
             print(f"p={p:.1f} target={target:.2f} raw/progressive={ratio_text} (raw K*={kr_text}, progressive K*={kp_text})")
+            for condition, (raw_k, raw_censored) in raw_pairs.items():
+                pair_ratio, pair_bound = _ratio_bound(
+                    raw_k, raw_censored, kp, kp_censored, max(budgets)
+                )
+                pair_ratio_rows.append({
+                    "p_redundancy": p, "target": target,
+                    "raw_condition": condition, "ratio": pair_ratio,
+                    "bound": pair_bound,
+                })
+                pair_text = (
+                    f"{pair_bound}{pair_ratio:.3f}" if pair_bound in {"=", ">", "<"}
+                    else "indeterminate (both censored)"
+                )
+                print(f"  pair {condition}/progressive={pair_text}")
     _write_csv(args.output_dir / "kstar.csv", kstar_rows)
+    _write_csv(args.output_dir / "kstar_ratios_by_pair.csv", pair_ratio_rows)
     _print_utility_table(rows, levels, budgets)
     _print_selected_per_type(details, levels)
 
-    primary = [row for row in ratio_rows if float(row["target"]) == 0.9]
-    values = [float(row["ratio"]) for row in primary]
-    relations = [row["bound"] for row in primary]
-    if all(value < 1.2 and rel in {"=", "<"} for value, rel in zip(values, relations, strict=True)):
-        decision = "STOP"
-    elif any(value >= 1.5 and rel in {"=", ">"} for value, rel in zip(values, relations, strict=True)):
-        decision = "PASS"
-    else:
-        decision = "REDUCED"
+    decision = _decision_from_pair_ratios(pair_ratio_rows)
     censored_count = sum(bool(row["censored"]) for row in kstar_rows)
     print(f"{decision}: oracle-reader pre-check (censored K* cases={censored_count}; included conservatively)")
 
@@ -208,6 +217,24 @@ def _ratio_bound(raw, raw_censored, progressive, progressive_censored, max_k):
     if progressive_censored:
         return raw / max_k, "<"
     return raw / progressive, "="
+
+
+def _decision_from_pair_ratios(rows):
+    """Apply the pre-check conservatively to every raw/progressive pair and target."""
+
+    if not rows:
+        return "REDUCED"
+    if any(
+        float(row["ratio"]) >= 1.5 and row["bound"] in {"=", ">"}
+        for row in rows
+    ):
+        return "PASS"
+    no_pair_can_reach_1_2 = all(
+        (row["bound"] == "=" and float(row["ratio"]) < 1.2)
+        or (row["bound"] == "<" and float(row["ratio"]) <= 1.2)
+        for row in rows
+    )
+    return "STOP" if no_pair_can_reach_1_2 else "REDUCED"
 
 
 def _mean(rows):
