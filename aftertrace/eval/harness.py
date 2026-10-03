@@ -287,15 +287,22 @@ def tune_parameters(
 
 
 def _policy_query_sample(world: World, per_type: int) -> list[Any]:
-    """Deterministic no-replacement, type-stratified policy-tuning sample."""
-    grouped: dict[str, list[Any]] = defaultdict(list)
+    """Balanced no-replacement sample over the evaluation query-type strata."""
+    query_types = ("A", "B", "C", "E", "R")
+    grouped: dict[str, list[Any]] = {kind: [] for kind in query_types}
     seen: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
     for query in world.queries:
+        if query.query_type not in grouped:
+            continue
         signature = (query.tokens, query.answer)
         if signature not in seen[query.query_type]:
             grouped[query.query_type].append(query)
             seen[query.query_type].add(signature)
-    return [query for kind in sorted(grouped) for query in grouped[kind][:per_type]]
+    missing = [kind for kind, rows in grouped.items() if not rows]
+    if missing:
+        raise ValueError(f"policy world {world.seed} has no unique queries for {missing}")
+    balanced_count = min(per_type, *(len(rows) for rows in grouped.values()))
+    return [query for kind in query_types for query in grouped[kind][:balanced_count]]
 
 
 def context_storage_bits(tokens: int, items: int, vocab_size: int, metadata_fields: int) -> float:

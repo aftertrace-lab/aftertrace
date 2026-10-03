@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from aftertrace.eval.harness import _retrieve_two_hop, evaluate_condition, tune_parameters
+from aftertrace.eval.harness import _policy_query_sample, _retrieve_two_hop, evaluate_condition, tune_parameters
 from aftertrace.memory.base import ItemView, MemoryItem
 from aftertrace.memory.conditions import make_condition
 from aftertrace.reader.oracle import OracleReader
@@ -78,6 +78,15 @@ def test_two_hop_retrieval_expands_entities_and_charges_both_passes():
 def test_tuning_rejects_eval_world_before_using_it(eval_world):
     with pytest.raises((AssertionError, ValueError)):
         tune_parameters([eval_world], {"progressive": {}})
+
+
+def test_policy_tuning_uses_balanced_eval_query_strata(world_config):
+    policy_world = make_world(1_000_001, {**world_config, "phase": "policy_tune"})
+    sample = _policy_query_sample(policy_world, 300)
+    counts = {kind: sum(query.query_type == kind for query in sample) for kind in ("A", "B", "C", "E", "R")}
+    assert len(set(counts.values())) == 1
+    assert 0 < next(iter(counts.values())) <= 300
+    assert len({(query.query_type, query.tokens, query.answer) for query in sample}) == len(sample)
 
 
 def test_oracle_confidence_reports_prediction_probability(eval_world):

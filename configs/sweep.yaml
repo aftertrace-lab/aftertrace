@@ -9,7 +9,9 @@ tuning:
   decay_rate_candidates: [0.005, 0.02]
   c_candidates: [1, 5]
   decay_rules: [time, recency_of_use, use_count, expected_utility]
-  queries_per_type: 10
+  # Match the eval stratification cap; policy worlds with scarce types use
+  # the same smaller count for every type to preserve the balanced mix.
+  queries_per_type: 300
   utility_weight_profiles:
     - {core_relational: 1.0, causal_linked: 1.0, temporal: 1.0, social: 1.0, incidental: 1.0, interference: 1.0}
     - {core_relational: 1.0, causal_linked: 1.0, temporal: 1.0, social: 1.0, incidental: 0.5, interference: 0.5}
