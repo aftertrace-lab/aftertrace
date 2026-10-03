@@ -173,6 +173,13 @@ class OracleReader:
         if query_type == "C":
             entity, relation, operator = query.tokens[1:4]
             matches = self._ordered_matches(facts, entity, relation)
+            summary_matches = [fact for fact in matches if fact.format == "SUM"]
+            if summary_matches:
+                summary_values = {fact.object for fact in summary_matches if fact.object is not None}
+                all_values = {fact.object for fact in matches if fact.object is not None}
+                if len(summary_values) != 1 or len(all_values) != 1 or operator == "PREV":
+                    return OraclePrediction("ABSTAIN", 0.0, len(matches))
+                return OraclePrediction(next(iter(summary_values)), 1.0, len(matches))
             values: list[FactEvidence] = []
             for fact in matches:
                 if not values or values[-1].object != fact.object:
@@ -185,6 +192,13 @@ class OracleReader:
         if query_type == "A":
             entity, relation = query.tokens[1:3]
             matches = self._ordered_matches(facts, entity, relation)
+            summary_matches = [fact for fact in matches if fact.format == "SUM"]
+            if summary_matches:
+                summary_values = {fact.object for fact in summary_matches if fact.object is not None}
+                all_values = {fact.object for fact in matches if fact.object is not None}
+                if len(summary_values) != 1 or len(all_values) != 1:
+                    return OraclePrediction("ABSTAIN", 0.0, len(matches))
+                return OraclePrediction(next(iter(summary_values)), 1.0, len(matches))
             exact = next((fact for fact in reversed(matches) if fact.object is not None), None)
             if exact is not None:
                 return OraclePrediction(str(exact.object), 1.0, len(matches))
@@ -223,7 +237,8 @@ class OracleReader:
     ) -> tuple[str, float] | None:
         works = [
             fact.object for fact in facts
-            if fact.subject == entity and fact.relation == "WORKS" and fact.object is not None
+            if fact.subject == entity and fact.relation == "WORKS"
+            and fact.object is not None and fact.format != "SUM"
         ]
         if not works:
             return None
@@ -242,6 +257,7 @@ class OracleReader:
             if fact.subject == subject and fact.relation == "TOLD"
             and fact.object is not None and fact.extra == ("AT", place)
             and fact.time == time
+            and fact.format != "SUM"
         ]
         if not told:
             return OraclePrediction("ABSTAIN", 0.0)
@@ -253,6 +269,7 @@ class OracleReader:
             fact for fact in facts
             if fact.subject == selected_told.object and fact.relation == "WORKS"
             and fact.object is not None
+            and fact.format != "SUM"
             and (
                 fact.episode_id is None or selected_told.episode_id is None
                 or fact.episode_id < selected_told.episode_id
@@ -273,12 +290,12 @@ class OracleReader:
         partner, place, time = tokens[2], tokens[4], tokens[5]
         moved_by_episode: dict[int | None, dict[str, FactEvidence]] = {}
         for fact in facts:
-            if fact.relation == "MOVED" and fact.object is not None:
+            if fact.format != "SUM" and fact.relation == "MOVED" and fact.object is not None:
                 moved_by_episode.setdefault(fact.episode_id, {})[fact.subject] = fact
 
         candidates: dict[int | None, str] = {}
         for interaction in facts:
-            if interaction.relation not in {"TOLD", "MET"} or interaction.object is None:
+            if interaction.format == "SUM" or interaction.relation not in {"TOLD", "MET"} or interaction.object is None:
                 continue
             moved = moved_by_episode.get(interaction.episode_id, {}).get(interaction.object)
             if moved is None:

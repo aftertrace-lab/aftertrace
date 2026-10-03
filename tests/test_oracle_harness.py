@@ -133,6 +133,36 @@ def test_oracle_does_not_guess_from_partial_r_cue(eval_world):
     assert prediction.answer == "ABSTAIN"
 
 
+def test_oracle_abstains_when_summary_values_conflict_or_are_insufficient(eval_world):
+    query = next(
+        query for query in eval_world.queries
+        if query.query_type == "A" and query.tokens[2] == "MOVED"
+    )
+    entity, _relation = query.tokens[1:3]
+    alternate = "C_59" if query.answer != "C_59" else "C_58"
+    conflicting = [
+        MemoryItem("sum-old", 99, ("SUM", entity, "MOVED", query.answer, "EOS"), None),
+        MemoryItem("sum-new", 199, ("SUM", entity, "MOVED", alternate, "EOS"), None),
+    ]
+    absent = [
+        MemoryItem("sum-work", 199, ("SUM", entity, "WORKS", "O_1", "EOS"), None),
+    ]
+    reader = OracleReader()
+    assert reader.predict(conflicting, query, eval_world.grammar, 0.6).answer == "ABSTAIN"
+    assert reader.predict(absent, query, eval_world.grammar, 0.6).answer == "ABSTAIN"
+
+
+def test_summary_r_utility_is_nonnegative(eval_world):
+    queries = [query for query in eval_world.queries if query.query_type == "R"][:40]
+    result = evaluate_condition(
+        eval_world, "summary", 384,
+        condition_config={"summary": {"summary_interval": 100}},
+        queries=queries,
+    )
+    assert result.per_type["R"]["utility"] >= 0.0
+    assert all(row.answer == "ABSTAIN" for row in result.results)
+
+
 def test_frontier_reports_censored_kstar_and_ratio_bounds():
     rows = [
         {"condition": "full_oracle", "p_redundancy": 0.6, "K": 32, "utility": 1.0},
