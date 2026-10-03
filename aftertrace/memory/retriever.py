@@ -81,7 +81,7 @@ class SharedRetriever:
 
         active = {id(view.item): view for view in views}
         stale = self._keys.keys() - active.keys()
-        for item_id in stale:
+        for item_id in sorted(stale):
             for token in self._keys.pop(item_id):
                 self._postings[token].discard(item_id)
         operations = 0
@@ -95,28 +95,18 @@ class SharedRetriever:
             operations += len(key)
             if item_id not in self._keys:
                 self._keys[item_id] = key
-                for token in key:
+                for token in sorted(key):
                     self._postings[token].add(item_id)
 
         scores: dict[int, int] = defaultdict(int)
-        for token in query_features(query_tokens):
-            for item_id in self._postings.get(token, ()):
+        for token in sorted(query_features(query_tokens)):
+            for item_id in sorted(self._postings.get(token, ())):
                 if item_id in active:
                     scores[item_id] += 1
-        positive = [
-            active[item_id] for item_id, score in scores.items() if score > 0
-        ]
-        positive.sort(
-            key=lambda view: (scores[id(view.item)], view.item.episode_id),
-            reverse=True,
-        )
-        positive_ids = {id(view.item) for view in positive}
-        # All zero-score candidates tie on lexical score, so recency alone ranks
-        # them; episode stores expose chronological order.
-        zero = [view for view in reversed(views) if id(view.item) not in positive_ids]
+        ranked = sorted(views, key=lambda view: _retrieval_tie_key(view, scores.get(id(view.item), 0)))
         selected: list[ItemView] = []
         used = 0
-        for view in (*positive, *zero):
+        for view in ranked:
             item_length = len(view.tokens)
             if item_length and used + item_length <= budget:
                 selected.append(view)
@@ -125,3 +115,20 @@ class SharedRetriever:
                 break
         assert used <= budget
         return RetrievalResult(tuple(selected), operations, used)
+
+
+def _retrieval_tie_key(view: ItemView, score: int) -> tuple[object, ...]:
+    item = view.item
+    entity = item.source_entity or next(
+        iter(sorted(
+            (token for token in view.tokens if token.startswith("E_")),
+            key=lambda token: int(token[2:]),
+        )),
+        "",
+    )
+    try:
+        entity_order: tuple[int, object] = (0, int(entity[2:])) if entity.startswith("E_") else (1, entity)
+    except ValueError:
+        entity_order = (1, entity)
+    recency = item.episode_id if item.episode_id is not None else -1
+    return (-score, -recency, str(item.key), entity_order, tuple(view.tokens))
