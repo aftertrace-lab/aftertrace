@@ -123,3 +123,12 @@ policy-tune worlds) versus the best of `raw_offload` and `raw_offload_qrender`
 is < 1.2× at every `p_redundancy` level and every K, Stage 0 stops: the mechanism
 lacks information-theoretic headroom. If ≥ 1.5× at any level, proceed to reader
 training. Between 1.2× and 1.5×, proceed with reduced priority.
+
+### 2026-10-03 — Matched-K fallback after v2, before v3
+
+If both progressive and best-raw K* are censored at every `p_redundancy`
+level and target, the K*-ratio rule is indeterminate and the decision falls
+back to matched-K utility: STOP if, at every `p_redundancy` level and every
+K, the upper 95% bootstrap bound of (progressive − best of `raw_offload`,
+`raw_offload_qrender`) is below +0.03. Reason: v2 showed the ceiling is
+unreachable while B retrieval fails, so K* cannot be computed.
