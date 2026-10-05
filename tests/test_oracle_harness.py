@@ -7,6 +7,7 @@ import pytest
 from aftertrace.eval.harness import _policy_query_sample, _retrieve_two_hop, evaluate_condition, tune_parameters
 from aftertrace.memory.base import ItemView, MemoryItem
 from aftertrace.memory.conditions import make_condition
+from aftertrace.memory.retriever import SharedRetriever
 from aftertrace.reader.oracle import OracleReader
 from scripts.oracle_frontier import _decision_from_pair_ratios, _frontier_k, _ratio_bound
 from aftertrace.world.generator import make_world
@@ -58,21 +59,62 @@ def test_two_hop_retrieval_expands_entities_and_charges_both_passes():
         def __init__(self):
             self.calls = []
 
-        def retrieve(self, views, query_tokens, budget):
-            self.calls.append((tuple(query_tokens), budget))
-            selected = (first_item,) if len(self.calls) == 1 else (second_item,)
-            return type("Result", (), {"selected": selected, "retrieval_ops": 7, "context_tokens": 6})()
+        def retrieve(self, views, query_tokens, budget, *, max_items=None):
+            self.calls.append((tuple(query_tokens), budget, max_items))
+            if len(self.calls) == 1:
+                selected, context_tokens = (first_item,), 6
+            else:
+                selected, context_tokens = (second_item,), 2
+            return type("Result", (), {
+                "selected": selected, "retrieval_ops": 7,
+                "context_tokens": context_tokens,
+            })()
 
     retriever = TrackingRetriever()
     selected, retrieval_ops = _retrieve_two_hop(
         retriever, [first_item, second_item], ("Q", "E_4", "WORKS", "A"), 8
     )
     assert retriever.calls == [
-        (("Q", "E_4", "WORKS", "A"), 8),
-        (("Q", "E_4", "WORKS", "A", "E_9", "E_11"), 8),
+        (("Q", "E_4", "WORKS", "A"), 8, 1),
+        (("Q", "E_4", "WORKS", "A", "E_9", "E_11"), 2, None),
     ]
-    assert selected == [second_item]
+    assert selected == [first_item, second_item]
     assert retrieval_ops == 14
+
+
+def test_two_hop_retrieval_keeps_the_first_hop_and_finds_b_work_episode(world_config):
+    eval_world = make_world(
+        2_000_004, {**world_config, "phase": "eval", "p_redundancy": 0.6}
+    )
+    seen = set()
+    queries = []
+    for query in eval_world.queries:
+        signature = (query.tokens, query.answer)
+        if query.query_type == "B" and signature not in seen:
+            seen.add(signature)
+            queries.append(query)
+        if len(queries) == 20:
+            break
+    assert len(queries) == 20
+
+    condition = make_condition(
+        "raw_offload", eval_world, {"raw_offload": {}}
+    )
+    retriever = SharedRetriever()
+    queries_by_step = {}
+    for query in queries:
+        queries_by_step.setdefault(query.after_episode, []).append(query)
+    retrieved_work_episodes = 0
+    for episode in eval_world.episodes:
+        condition.observe(episode, episode.id)
+        for query in queries_by_step.get(episode.id, ()):
+            selected, _ = _retrieve_two_hop(
+                retriever, condition.views(query, episode.id), query.tokens, 384
+            )
+            selected_ids = {view.item.episode_id for view in selected}
+            work_episode = min(query.evidence_episode_ids)
+            retrieved_work_episodes += work_episode in selected_ids
+    assert retrieved_work_episodes == 20
 
 
 def test_tuning_rejects_eval_world_before_using_it(eval_world):

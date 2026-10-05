@@ -176,20 +176,55 @@ def evaluate_condition(
 
 
 def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
-    """Expand the query once with entities found in its first retrieved view."""
+    """Retrieve a first-hop item, then spend the remaining K on its entities.
 
-    first = retriever.retrieve(views, query_tokens, budget)
-    entities = {
-        token
-        for view in first.selected
-        for token in view.tokens
-        if token.startswith("E_")
-    }
-    expanded = tuple(query_tokens) + tuple(sorted(entities - set(query_tokens), key=lambda token: int(token[2:])))
-    second = retriever.retrieve(views, expanded, budget)
-    if second.context_tokens > budget:
-        raise AssertionError(f"two-hop context {second.context_tokens} exceeds K={budget}")
-    return list(second.selected), first.retrieval_ops + second.retrieval_ops
+    HOP2/CTX queries identify the useful second-hop entity as the object of
+    their retrieved TOLD/MET interaction. Other queries expand with all entity
+    tokens in the first item. The first-hop item remains in context so the
+    reader can compose the two pieces of evidence.
+    """
+
+    first = retriever.retrieve(views, query_tokens, budget, max_items=1)
+    selected = list(first.selected)
+    used = first.context_tokens
+    selected_item_ids = {id(view.item) for view in selected}
+    interaction_targets = set()
+    for view in selected:
+        tokens = view.tokens
+        for index, token in enumerate(tokens[:-1]):
+            if token in {"TOLD", "MET"} and tokens[index + 1].startswith("E_"):
+                interaction_targets.add(tokens[index + 1])
+
+    if any(token in {"HOP2", "CTX"} for token in query_tokens) and interaction_targets:
+        entities = interaction_targets
+        second_candidates = [
+            view for view in views
+            if id(view.item) not in selected_item_ids
+            and any(entity in view.tokens for entity in entities)
+        ]
+        second_query = tuple(sorted(entities, key=lambda token: int(token[2:]))) + tuple(
+            token for token in query_tokens if token in {"WORKS", "MOVED"}
+        )
+    else:
+        entities = {
+            token
+            for view in selected
+            for token in view.tokens
+            if token.startswith("E_")
+        }
+        second_candidates = [view for view in views if id(view.item) not in selected_item_ids]
+        second_query = tuple(query_tokens) + tuple(
+            sorted(entities - set(query_tokens), key=lambda token: int(token[2:]))
+        )
+
+    second = retriever.retrieve(
+        second_candidates, second_query, max(0, budget - used)
+    )
+    selected.extend(second.selected)
+    context_tokens = used + second.context_tokens
+    if context_tokens > budget:
+        raise AssertionError(f"two-hop context {context_tokens} exceeds K={budget}")
+    return selected, first.retrieval_ops + second.retrieval_ops
 
 
 def tune_parameters(

@@ -41,6 +41,7 @@ def retrieve(
     budget: int,
     *,
     render: Callable[[MemoryItem], tuple[str, ...]] | None = None,
+    max_items: int | None = None,
 ) -> RetrievalResult:
     """Rank by overlap then recency and greedily pack whole items within K.
 
@@ -49,7 +50,9 @@ def retrieve(
     is skipped and later smaller items may still fill the remaining budget.
     """
 
-    return SharedRetriever().retrieve(candidates, query_tokens, budget, render=render)
+    return SharedRetriever().retrieve(
+        candidates, query_tokens, budget, render=render, max_items=max_items
+    )
 
 
 class SharedRetriever:
@@ -66,9 +69,12 @@ class SharedRetriever:
         budget: int,
         *,
         render: Callable[[MemoryItem], tuple[str, ...]] | None = None,
+        max_items: int | None = None,
     ) -> RetrievalResult:
         if budget < 0:
             raise ValueError("retrieval budget K must be non-negative")
+        if max_items is not None and max_items < 1:
+            raise ValueError("max_items must be positive when specified")
         views: list[ItemView] = []
         for candidate in candidates:
             if isinstance(candidate, ItemView):
@@ -111,6 +117,8 @@ class SharedRetriever:
             if item_length and used + item_length <= budget:
                 selected.append(view)
                 used += item_length
+                if max_items is not None and len(selected) >= max_items:
+                    break
             if used == budget:
                 break
         assert used <= budget
