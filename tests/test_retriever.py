@@ -78,6 +78,9 @@ print(json.dumps([(v.item.key, v.item.source_entity) for v in r.selected]))
         )
         frontier_outputs.append({
             name: (output_dir / name).read_bytes()
-            for name in ("frontier.csv", "per_type.csv", "kstar.csv", "kstar_ratios_by_pair.csv")
+            for name in (
+                "frontier.csv", "per_type.csv", "kstar.csv",
+                "kstar_ratios_by_pair.csv", "matched_k_bootstrap.csv",
+            )
         })
     assert frontier_outputs[0] == frontier_outputs[1]

@@ -101,6 +101,10 @@ def evaluate_condition(
         by_step[query.after_episode].append(query)
     results: list[QueryResult] = []
     sum_fields: dict[str, float] = defaultdict(float)
+    rendered_item_tokens = 0
+    raw_l4_item_tokens = 0
+    raw_l4_item_count = 0
+    retrieved_item_count = 0
     for episode in world.episodes:
         condition.observe(episode, episode.id)
         for query in by_step.get(episode.id, ()):
@@ -123,6 +127,15 @@ def evaluate_condition(
                     retriever, views, query.tokens, K, render=render
                 )
                 context_tokens = sum(len(view.tokens) for view in selected)
+            rendered_item_tokens += sum(len(view.tokens) for view in selected)
+            retrieved_item_count += len(selected)
+            for view in selected:
+                if view.item.source_episode is not None:
+                    raw_tokens = len(view.item.source_episode.tokens)
+                    raw_l4_item_tokens += raw_tokens
+                    raw_l4_item_count += 1
+                    if condition_name == "raw_offload_qrender" and len(view.tokens) >= raw_tokens:
+                        raise AssertionError("qrender item must be shorter than its raw L4 source")
             prediction = oracle.predict(
                 selected, query, world.grammar, float(world.config["p_redundancy"])
             )
@@ -170,11 +183,18 @@ def evaluate_condition(
             "abstain": sum(r.answer == "ABSTAIN" for r in group) / max(1, len(group)),
         }
     count = max(1, len(results))
+    mean_accounting = {key: value / count for key, value in sum_fields.items()}
+    mean_accounting["mean_rendered_tokens_per_item"] = (
+        rendered_item_tokens / retrieved_item_count if retrieved_item_count else 0.0
+    )
+    mean_accounting["mean_raw_l4_tokens_per_item"] = (
+        raw_l4_item_tokens / raw_l4_item_count if raw_l4_item_count else 0.0
+    )
     return Evaluation(
         condition_name, K, results,
         sum(r.score for r in results) / count,
         per_type,
-        {key: value / count for key, value in sum_fields.items()},
+        mean_accounting,
     )
 
 

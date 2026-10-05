@@ -4,6 +4,8 @@ eval_worlds_per_level: 4
 policy_tune_worlds: 4
 stratified_queries_per_type: 300
 frontier_targets: [0.8, 0.9, 0.95]
+matched_k_bootstrap_replicates: 10000
+matched_k_bootstrap_seed: 1207
 tuning:
   tau_candidates: [0.7, 0.9]
   decay_rate_candidates: [0.005, 0.02]

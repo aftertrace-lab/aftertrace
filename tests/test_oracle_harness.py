@@ -9,7 +9,10 @@ from aftertrace.memory.base import ItemView, MemoryItem
 from aftertrace.memory.conditions import make_condition
 from aftertrace.memory.retriever import SharedRetriever
 from aftertrace.reader.oracle import OracleReader
-from scripts.oracle_frontier import _decision_from_pair_ratios, _frontier_k, _ratio_bound
+from scripts.oracle_frontier import (
+    _decision_from_pair_ratios, _frontier_k, _matched_k_bootstrap,
+    _matched_k_fallback, _ratio_bound,
+)
 from aftertrace.world.generator import make_world
 
 
@@ -128,11 +131,12 @@ def test_qrender_keeps_second_hop_facts_and_packs_on_rendered_tokens(eval_world)
         view, query, extra_entities=entities
     )
     selected, _ = _retrieve_two_hop(
-        SharedRetriever(), views, query.tokens, 128, render=render
+        SharedRetriever(), views, query.tokens, 32, render=render
     )
     assert selected
     rendered_total = sum(len(view.tokens) for view in selected)
-    assert rendered_total <= 128
+    assert rendered_total <= 32
+    assert sum(view.item.token_count for view in selected) > 32
     assert all(len(view.tokens) < view.item.token_count for view in selected)
 
     told_episode = next(
@@ -153,6 +157,10 @@ def test_qrender_keeps_second_hop_facts_and_packs_on_rendered_tokens(eval_world)
     )
     assert target in rendered_work.tokens
     assert "WORKS" in rendered_work.tokens
+    retrieved_work = next(
+        view for view in selected if view.item.episode_id == work_episode_id
+    )
+    assert target in retrieved_work.tokens and "WORKS" in retrieved_work.tokens
 
 
 def test_tuning_rejects_eval_world_before_using_it(eval_world):
@@ -262,6 +270,34 @@ def test_frontier_decision_accounts_for_every_censoring_bound():
     assert _decision_from_pair_ratios(exact_low + [{"ratio": 1.1, "bound": ">"}]) == "REDUCED"
     assert _decision_from_pair_ratios(exact_low + [{"ratio": float("nan"), "bound": "interval"}]) == "REDUCED"
     assert _decision_from_pair_ratios(exact_low + [{"ratio": 1.5, "bound": "="}]) == "PASS"
+
+
+def test_matched_k_bootstrap_is_paired_deterministic_and_drives_fallback():
+    rows = []
+    values = {
+        "progressive": (0.50, 0.50, 0.50, 0.50),
+        "raw_offload": (0.48, 0.48, 0.48, 0.48),
+        "raw_offload_qrender": (0.49, 0.49, 0.49, 0.49),
+    }
+    for condition, scores in values.items():
+        for seed, utility in enumerate(scores, start=1):
+            rows.append({
+                "seed": seed, "p_redundancy": 0.2, "K": 32,
+                "condition": condition, "utility": utility,
+            })
+    first = _matched_k_bootstrap(rows, [0.2], [32], replicates=1000, seed=17)
+    second = _matched_k_bootstrap(rows, [0.2], [32], replicates=1000, seed=17)
+    assert first == second
+    assert first[0]["difference"] == pytest.approx(0.01)
+    assert first[0]["ci95_upper"] == pytest.approx(0.01)
+    censored = [
+        {"p_redundancy": 0.2, "target": target, "condition": condition, "censored": True}
+        for target in (0.8, 0.9, 0.95)
+        for condition in ("progressive", "best_raw")
+    ]
+    assert _matched_k_fallback(censored, first).startswith("STOP")
+    over_threshold = [{**first[0], "ci95_upper": 0.03}]
+    assert _matched_k_fallback(censored, over_threshold).startswith("NO STOP")
 
 
 def test_summary_exposes_snapshot_items_after_rewrite(eval_world):

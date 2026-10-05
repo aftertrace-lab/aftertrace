@@ -133,6 +133,8 @@ def main() -> None:
                         "context_tokens": result.mean_accounting.get("context_tokens", 0.0),
                         "retrieval_ops": result.mean_accounting.get("retrieval_ops", 0.0),
                         "store_tokens": result.mean_accounting.get("store_tokens", 0.0),
+                        "mean_tokens_per_item": result.mean_accounting.get("mean_rendered_tokens_per_item", 0.0),
+                        "mean_raw_l4_tokens_per_item": result.mean_accounting.get("mean_raw_l4_tokens_per_item", 0.0),
                     })
                     for qtype, metrics in result.per_type.items():
                         details.append({
@@ -201,12 +203,22 @@ def main() -> None:
                 print(f"  pair {condition}/progressive={pair_text}")
     _write_csv(args.output_dir / "kstar.csv", kstar_rows)
     _write_csv(args.output_dir / "kstar_ratios_by_pair.csv", pair_ratio_rows)
+    matched_k_rows = _matched_k_bootstrap(
+        rows, levels, budgets,
+        replicates=int(sweep["matched_k_bootstrap_replicates"]),
+        seed=int(sweep["matched_k_bootstrap_seed"]),
+    )
+    _write_csv(args.output_dir / "matched_k_bootstrap.csv", matched_k_rows)
     _print_utility_table(rows, levels, budgets)
     _print_selected_per_type(details, levels)
+    _print_qrender_size_table(rows, levels, budgets)
+    _print_matched_k_bootstrap(matched_k_rows, levels)
 
     decision = _decision_from_pair_ratios(pair_ratio_rows)
     censored_count = sum(bool(row["censored"]) for row in kstar_rows)
-    print(f"{decision}: oracle-reader pre-check (censored K* cases={censored_count}; included conservatively)")
+    print(f"Original K*-ratio rule: {decision}: oracle-reader pre-check (censored K* cases={censored_count}; included conservatively)")
+    fallback = _matched_k_fallback(kstar_rows, matched_k_rows)
+    print(f"After-v2 matched-K fallback: {fallback}")
 
 
 def _ratio_bound(raw, raw_censored, progressive, progressive_censored, max_k):
@@ -235,6 +247,82 @@ def _decision_from_pair_ratios(rows):
         for row in rows
     )
     return "STOP" if no_pair_can_reach_1_2 else "REDUCED"
+
+
+def _matched_k_bootstrap(rows, levels, budgets, *, replicates: int, seed: int):
+    """Paired bootstrap over eval worlds; best raw is max of raw means per draw."""
+    output = []
+    for level_index, p in enumerate(levels):
+        for budget in budgets:
+            selected = [
+                row for row in rows
+                if row["p_redundancy"] == p and row["K"] == budget
+            ]
+            by_condition_seed = {
+                (row["condition"], int(row["seed"])): float(row["utility"])
+                for row in selected
+            }
+            conditions = ("progressive", "raw_offload", "raw_offload_qrender")
+            seeds = sorted(
+                set.intersection(*(
+                    {world_seed for (condition, world_seed) in by_condition_seed
+                     if condition == name}
+                    for name in conditions
+                ))
+            ) if all(
+                any(condition == name for condition, _ in by_condition_seed)
+                for name in conditions
+            ) else []
+            if not seeds:
+                continue
+            progressive = np.asarray(
+                [by_condition_seed[("progressive", world_seed)] for world_seed in seeds]
+            )
+            raw_offload = np.asarray(
+                [by_condition_seed[("raw_offload", world_seed)] for world_seed in seeds]
+            )
+            raw_qrender = np.asarray(
+                [by_condition_seed[("raw_offload_qrender", world_seed)] for world_seed in seeds]
+            )
+            best_raw_condition = (
+                "raw_offload" if raw_offload.mean() >= raw_qrender.mean()
+                else "raw_offload_qrender"
+            )
+            best_raw_mean = max(float(raw_offload.mean()), float(raw_qrender.mean()))
+            difference = float(progressive.mean()) - best_raw_mean
+            rng = np.random.default_rng(seed + level_index * 100_000 + int(budget))
+            draws = rng.integers(0, len(seeds), size=(replicates, len(seeds)))
+            prog_draw = progressive[draws].mean(axis=1)
+            raw_draw = np.maximum(
+                raw_offload[draws].mean(axis=1),
+                raw_qrender[draws].mean(axis=1),
+            )
+            delta_draw = prog_draw - raw_draw
+            lower, upper = np.quantile(delta_draw, (0.025, 0.975))
+            output.append({
+                "p_redundancy": p, "K": budget, "n_worlds": len(seeds),
+                "progressive_utility": float(progressive.mean()),
+                "best_raw_condition": best_raw_condition,
+                "best_raw_utility": best_raw_mean,
+                "difference": difference,
+                "ci95_lower": float(lower), "ci95_upper": float(upper),
+                "bootstrap_replicates": replicates,
+            })
+    return output
+
+
+def _matched_k_fallback(kstar_rows, matched_rows):
+    grouped = {}
+    for row in kstar_rows:
+        grouped.setdefault((row["p_redundancy"], row["target"]), {})[row["condition"]] = bool(row["censored"])
+    if not grouped or not all(
+        values.get("progressive", False) and values.get("best_raw", False)
+        for values in grouped.values()
+    ):
+        return "NOT TRIGGERED (progressive and best-raw K* are not both censored at every p/target)"
+    if matched_rows and all(float(row["ci95_upper"]) < 0.03 for row in matched_rows):
+        return "STOP (upper 95% matched-K bootstrap bound < +0.03 at every p and K)"
+    return "NO STOP (the matched-K STOP criterion is not met)"
 
 
 def _mean(rows):
@@ -269,6 +357,34 @@ def _print_selected_per_type(details, levels):
                 n = sum(row["n"] for row in group)
                 utility = _mean([row["utility"] for row in group])
                 print(f"  {condition:20s} type={query_type} n={int(n)} U={utility:.4f}")
+
+
+def _print_qrender_size_table(rows, levels, budgets):
+    print("\nQRENDER TOKENS PER ITEM (mean over eval worlds; raw L4 measured on the same retrieved items)")
+    for p in levels:
+        print(f"p_redundancy={p:.1f}")
+        for budget in budgets:
+            group = [
+                row for row in rows
+                if row["p_redundancy"] == p and row["K"] == budget
+                and row["condition"] == "raw_offload_qrender"
+            ]
+            rendered = _mean([float(row.get("mean_tokens_per_item", 0.0)) for row in group])
+            raw = _mean([float(row.get("mean_raw_l4_tokens_per_item", 0.0)) for row in group])
+            print(f"  K={budget}: rendered={rendered:.2f} raw_L4={raw:.2f}")
+
+
+def _print_matched_k_bootstrap(rows, levels):
+    print("\nMATCHED-K UTILITY DIFFERENCE (progressive - best raw; paired world bootstrap 95% CI)")
+    for p in levels:
+        print(f"p_redundancy={p:.1f}")
+        for row in rows:
+            if row["p_redundancy"] == p:
+                print(
+                    f"  K={row['K']:>3}: delta={row['difference']:+.4f} "
+                    f"CI=[{row['ci95_lower']:+.4f}, {row['ci95_upper']:+.4f}] "
+                    f"best_raw={row['best_raw_condition']} n_worlds={row['n_worlds']}"
+                )
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
