@@ -114,11 +114,14 @@ def evaluate_condition(
                 context_tokens = sum(len(view.tokens) for view in selected)
             else:
                 views = condition.views(query, episode.id)
-                selected, retrieval_ops = _retrieve_two_hop(
-                    retriever, views, query.tokens, K
-                )
+                render = None
                 if condition_name == "raw_offload_qrender":
-                    selected = [condition.render_retrieved(view, query) for view in selected]
+                    render = lambda view, entities: condition.render_retrieved(
+                        view, query, extra_entities=entities
+                    )
+                selected, retrieval_ops = _retrieve_two_hop(
+                    retriever, views, query.tokens, K, render=render
+                )
                 context_tokens = sum(len(view.tokens) for view in selected)
             prediction = oracle.predict(
                 selected, query, world.grammar, float(world.config["p_redundancy"])
@@ -175,7 +178,7 @@ def evaluate_condition(
     )
 
 
-def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
+def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget, *, render=None):
     """Retrieve a first-hop item, then spend the remaining K on its entities.
 
     HOP2/CTX queries identify the useful second-hop entity as the object of
@@ -184,7 +187,8 @@ def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
     reader can compose the two pieces of evidence.
     """
 
-    first = retriever.retrieve(views, query_tokens, budget, max_items=1)
+    first_views = [render(view, frozenset()) for view in views] if render else views
+    first = retriever.retrieve(first_views, query_tokens, budget, max_items=1)
     selected = list(first.selected)
     used = first.context_tokens
     selected_item_ids = {id(view.item) for view in selected}
@@ -198,7 +202,7 @@ def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
     if any(token in {"HOP2", "CTX"} for token in query_tokens) and interaction_targets:
         entities = interaction_targets
         second_candidates = [
-            view for view in views
+            render(view, frozenset(entities)) if render else view for view in views
             if id(view.item) not in selected_item_ids
             and any(entity in view.tokens for entity in entities)
         ]
@@ -212,7 +216,10 @@ def _retrieve_two_hop(retriever: SharedRetriever, views, query_tokens, budget):
             for token in view.tokens
             if token.startswith("E_")
         }
-        second_candidates = [view for view in views if id(view.item) not in selected_item_ids]
+        second_candidates = [
+            render(view, frozenset(entities)) if render else view for view in views
+            if id(view.item) not in selected_item_ids
+        ]
         second_query = tuple(query_tokens) + tuple(
             sorted(entities - set(query_tokens), key=lambda token: int(token[2:]))
         )

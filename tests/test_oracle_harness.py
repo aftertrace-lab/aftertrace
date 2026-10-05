@@ -117,6 +117,44 @@ def test_two_hop_retrieval_keeps_the_first_hop_and_finds_b_work_episode(world_co
     assert retrieved_work_episodes == 20
 
 
+def test_qrender_keeps_second_hop_facts_and_packs_on_rendered_tokens(eval_world):
+    query = next(query for query in eval_world.queries if query.query_type == "B")
+    config = {"raw_offload_qrender": {}}
+    condition = make_condition("raw_offload_qrender", eval_world, config)
+    for episode in eval_world.episodes[:query.after_episode + 1]:
+        condition.observe(episode, episode.id)
+    views = condition.views(query, query.after_episode)
+    render = lambda view, entities: condition.render_retrieved(
+        view, query, extra_entities=entities
+    )
+    selected, _ = _retrieve_two_hop(
+        SharedRetriever(), views, query.tokens, 128, render=render
+    )
+    assert selected
+    rendered_total = sum(len(view.tokens) for view in selected)
+    assert rendered_total <= 128
+    assert all(len(view.tokens) < view.item.token_count for view in selected)
+
+    told_episode = next(
+        episode for episode in eval_world.episodes
+        if episode.id == query.target_episode_id
+    )
+    target = next(
+        fact.object for fact in told_episode.facts
+        if fact.relation == "TOLD" and fact.subject == query.tokens[2]
+    )
+    work_episode_id = next(
+        episode_id for episode_id in query.evidence_episode_ids
+        if episode_id != query.target_episode_id
+    )
+    work_view = next(view for view in views if view.item.episode_id == work_episode_id)
+    rendered_work = condition.render_retrieved(
+        work_view, query, extra_entities={target}
+    )
+    assert target in rendered_work.tokens
+    assert "WORKS" in rendered_work.tokens
+
+
 def test_tuning_rejects_eval_world_before_using_it(eval_world):
     with pytest.raises((AssertionError, ValueError)):
         tune_parameters([eval_world], {"progressive": {}})

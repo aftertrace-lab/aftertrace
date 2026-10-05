@@ -96,8 +96,12 @@ class EpisodeStore(MemoryCondition):
         return result
 
     @staticmethod
-    def render_retrieved(view: ItemView, query: Any) -> ItemView:
-        return ItemView(view.item, _query_render(view.item, query), view.key_tokens)
+    def render_retrieved(
+        view: ItemView, query: Any, *, extra_entities=()
+    ) -> ItemView:
+        return ItemView(
+            view.item, _query_render(view.item, query, extra_entities), view.key_tokens
+        )
 
     def after_retrieval(self, selected: list[ItemView], step: int, *, successful: bool) -> None:
         super().after_retrieval(selected, step, successful=successful)
@@ -107,12 +111,15 @@ class EpisodeStore(MemoryCondition):
                 view.item.fidelity_step = step
 
 
-def _query_render(item: MemoryItem, query: Any) -> tuple[str, ...]:
+def _query_render(
+    item: MemoryItem, query: Any, extra_entities=()
+) -> tuple[str, ...]:
     """Keep only exact fact keys or cue-supporting facts in a retrieved item."""
     episode = item.source_episode
     if episode is None:
         return item.tokens
     q = set(query.tokens)
+    matched_entities = q | set(extra_entities)
     cue_targets: set[str] = set()
     cue_interactions = []
     if "CTX" in q and len(query.tokens) >= 6:
@@ -138,10 +145,8 @@ def _query_render(item: MemoryItem, query: Any) -> tuple[str, ...]:
                 cue_interactions.append(fact)
     kept = []
     for fact in episode.facts:
-        exact = (
-            query.query_type != "R"
-            and fact.subject in q
-            and fact.relation in q
+        exact = fact.subject in matched_entities and fact.relation in q and (
+            query.query_type != "R" or fact.subject in extra_entities
         )
         cue = fact in cue_interactions or (
             fact.relation == "MOVED"
