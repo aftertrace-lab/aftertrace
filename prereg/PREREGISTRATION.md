@@ -132,3 +132,8 @@ back to matched-K utility: STOP if, at every `p_redundancy` level and every
 K, the upper 95% bootstrap bound of (progressive − best of `raw_offload`,
 `raw_offload_qrender`) is below +0.03. Reason: v2 showed the ceiling is
 unreachable while B retrieval fails, so K* cannot be computed.
+
+### 2026-10-05 — Stage 0 concluded
+
+Stage 0 concluded: STOP (2026-10-05, results commit 6678ba6). Trained-reader
+phase not run: an oracle-reader loss bounds any learned reader.
