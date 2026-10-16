@@ -1,7 +1,21 @@
-runs/
+# Run outputs stay local, except the frozen Stage 0 frontier runs
+# that the published results are computed from.
+runs/*
+!runs/oracle_frontier_final/
+!runs/oracle_frontier_v2/
+!runs/oracle_frontier_v3/
+runs/**/*.partial.csv
+
 __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
-
 .DS_Store
+
+# The paper is published separately once it is final.
+Paper (Stage 0)/
+
+# Internal working notes, kept out of the public repository.
+AGENTS.md
+docs/TASKS.md
+*.bundle

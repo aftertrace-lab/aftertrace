@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this code or these results, please cite them as below."
+title: "Aftertrace Stage 0: Storage-time forgetting does not beat query-time selection"
+abstract: "A pre-registered oracle-reader test of progressive memory demotion under a context-token budget. Decision: STOP."
+authors:
+  - family-names: Kumar
+    given-names: Shikhar
+    affiliation: Aftertrace
+type: software
+version: stage0-stop
+date-released: 2026-10-05
+license: MIT
+repository-code: "https://github.com/aftertrace-lab/aftertrace"
+url: "https://aftertrace.org/research/storage-time-forgetting"
+keywords:
+  - memory
+  - forgetting
+  - retrieval
+  - context budget
+  - pre-registration
+  - negative result

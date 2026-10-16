@@ -1,0 +1,14 @@
+{
+  "launches": [
+    {
+      "git_hash": "ae0a4fbdecabd1f55b5f221f03c75ddad4feb375",
+      "dirty": false,
+      "allow_dirty": false
+    },
+    {
+      "git_hash": "ae0a4fbdecabd1f55b5f221f03c75ddad4feb375",
+      "dirty": false,
+      "allow_dirty": false
+    }
+  ]
+}
